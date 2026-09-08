@@ -1,0 +1,20 @@
+import { mkdtemp } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { describe, expect, it } from "vitest";
+import { Storage } from "../../packages/storage/src/index.js";
+
+describe("shared two-step budget ledger", () => {
+  it("atomically reserves at most 50 credits, deduplicates steps, and never releases pending spend", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "flowbridge-budget-"));
+    const storage = new Storage(join(dir, "db.sqlite"));
+    expect(storage.reserveBudgetStep("run-1", "step-a", 30).quotedCredits).toBe(30);
+    expect(storage.reserveBudgetStep("run-1", "step-b", 20).quotedCredits).toBe(20);
+    expect(storage.reserveBudgetStep("run-1", "step-a", 30).state).toBe("RESERVED");
+    expect(() => storage.reserveBudgetStep("run-1", "step-c", 1)).toThrow("BUDGET_EXCEEDED");
+    expect(storage.consumeBudgetStep("run-1", "step-a").state).toBe("CONSUMED");
+    expect(() => storage.reserveBudgetStep("run-1", "step-c", 1)).toThrow("BUDGET_EXCEEDED");
+    expect(storage.getBudgetLedger("run-1")).toMatchObject({ capCredits: 50, reservedCredits: 50, consumedCredits: 30 });
+    storage.close();
+  });
+});

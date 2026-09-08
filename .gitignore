@@ -1,0 +1,32 @@
+# Local dependency and build output
+node_modules/
+.pnpm-store/
+dist/
+coverage/
+test-reports/
+__pycache__/
+*.pyc
+
+# Runtime state and credentials
+.env
+.env.*
+!.env.example
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+*.token
+*.log
+state/
+out/
+qc/
+
+# Generated media and temporary archives
+*.mp4
+*.mov
+*.wav
+*.mp3
+*.zip
+*.tmp
+
+# Platform metadata
+.DS_Store

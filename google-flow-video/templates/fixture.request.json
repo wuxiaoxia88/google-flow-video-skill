@@ -1,0 +1,15 @@
+{
+  "backend": "flow_ui",
+  "idempotency_key": "skill-fixture-no-run-v1",
+  "project": { "name": "skill-fixture", "reuse": false },
+  "mode": "text_to_video",
+  "prompt": "Sanitized fixture: a quiet abstract blue scene. Picture and background music only; no speech, dialogue, narration, lyrics, or recognizable vocals.",
+  "prompt_mode": "verbatim",
+  "model": "fixture-model",
+  "aspect_ratio": "16:9",
+  "duration_seconds": 8,
+  "resolution": "720p",
+  "outputs": 1,
+  "download": { "enabled": false, "format": "mp4" },
+  "cost_policy": { "max_credits": 50, "confirm_above": 50, "reject_when_unknown": true }
+}

@@ -1,0 +1,15 @@
+{
+  "backend": "flow_ui",
+  "idempotency_key": "replace-with-a-unique-user-job-key",
+  "project": { "name": "replace-with-user-project-name", "reuse": false },
+  "mode": "text_to_video",
+  "prompt": "Replace this text with the derived prompt. Preserve the user's creative master separately. Add: keep the dialogue performance and timing only as a visual reference; do not generate spoken language, dialogue, narration, lyrics, or recognizable vocal sounds; output picture and background music only.",
+  "prompt_mode": "verbatim",
+  "model": "replace-with-currently-visible-flow-model",
+  "aspect_ratio": "16:9",
+  "duration_seconds": 8,
+  "resolution": "720p",
+  "outputs": 1,
+  "download": { "enabled": true, "directory": "replace-with-user-output-directory", "format": "mp4" },
+  "cost_policy": { "max_credits": 50, "confirm_above": 50, "reject_when_unknown": true }
+}

@@ -1,0 +1,30 @@
+import { mkdtemp, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { describe, expect, it } from "vitest";
+import type { FlowProvider, RuntimeSubmissionSnapshot, VideoGenerationRequest } from "../../packages/contracts/src/index.js";
+import { FlowBridgeError } from "../../packages/contracts/src/index.js";
+import { JobEngine } from "../../packages/job-engine/src/index.js";
+import { Storage } from "../../packages/storage/src/index.js";
+
+class FakeProvider implements FlowProvider {
+  readonly kind="mock" as const; submits=0; reconciles=0;
+  constructor(public credits:number|null=4, public throwAfterClick=false) {}
+  async prepare(r:VideoGenerationRequest){const snapshot:RuntimeSubmissionSnapshot={configurationVerified:true,visibleAccountContext:"test",projectRef:r.project.name,model:r.model,mode:r.mode,durationSeconds:r.durationSeconds,aspectRatio:r.aspectRatio,resolution:r.resolution,outputs:r.outputs,totalCredits:this.credits,availableCredits:null,capturedAt:new Date().toISOString(),capabilityFingerprint:"fixture"};return {snapshot,handle:"retained-fixture-session"};}
+  async submitPrepared(){this.submits++;if(this.throwAfterClick)throw new Error("crash-after-click");return {evidence:{placeholder:true}};}
+  async reconcile(){this.reconciles++;return {assets:[],complete:false};}
+  async download(a:any){return a;}
+}
+
+async function setup(cost:number|null=4){const dir=await mkdtemp(join(tmpdir(),"flowbridge-"));const asset=join(dir,"input.png");await writeFile(asset,"frozen");const storage=new Storage(join(dir,"db.sqlite"));const provider=new FakeProvider(cost);const engine=new JobEngine(storage,new Map([["mock",provider]]));return {dir,asset,storage,provider,engine};}
+const request=(asset:string,key="k1"):VideoGenerationRequest=>({provider:"mock",idempotencyKey:key,project:{name:"p"},mode:"ingredients_to_video",prompt:"exact prompt",promptMode:"verbatim",model:"fixture-model",aspectRatio:"16:9",durationSeconds:4,resolution:"360p",outputs:1,inputs:{ingredients:[{path:asset}]},download:{enabled:false},costPolicy:{maxCredits:50,confirmAbove:50,rejectWhenUnknown:true},authorizationContext:{source:"current_conversation",explicitlyRequestedGeneration:true}});
+
+describe("M0 safety core",()=>{
+  it.each([null,51])("blocks unknown or over-cap cost %s before submit",async cost=>{const x=await setup(cost);const job=await x.engine.create(request(x.asset));await expect(x.engine.run(job.id)).rejects.toBeInstanceOf(FlowBridgeError);expect(x.provider.submits).toBe(0);x.storage.close();});
+  it("deduplicates the same request and conflicts on changed immutable content",async()=>{const x=await setup();const one=await x.engine.create(request(x.asset));const two=await x.engine.create(request(x.asset));expect(two.id).toBe(one.id);await writeFile(x.asset,"changed");await expect(x.engine.create(request(x.asset))).rejects.toMatchObject({code:"IDEMPOTENCY_CONFLICT"});x.storage.close();});
+  it("records intent before submit and never submits again after crash/restart",async()=>{const x=await setup();x.provider.throwAfterClick=true;const job=await x.engine.create(request(x.asset));await expect(x.engine.run(job.id)).rejects.toThrow("crash-after-click");expect(x.provider.submits).toBe(1);x.provider.throwAfterClick=false;await x.engine.run(job.id);expect(x.provider.submits).toBe(1);expect(x.provider.reconciles).toBe(1);expect(x.engine.get(job.id).state).toBe("SUBMISSION_UNCERTAIN");x.storage.close();});
+  it("cancels pre-intent and marks provider-may-continue after intent",async()=>{const a=await setup();const j1=await a.engine.create(request(a.asset,"pre"));expect(a.engine.cancel(j1.id).state).toBe("CANCELLED_PRE_SUBMIT");const j2=await a.engine.create(request(a.asset,"post"));await a.engine.run(j2.id);expect(a.engine.cancel(j2.id).state).toBe("LOCAL_WAIT_CANCELLED_PROVIDER_CONTINUES");a.storage.close();});
+  it("rejects final readback drift before the mock side effect",async()=>{const x=await setup(12);const drifting=new (await import("../../packages/job-engine/src/mock-provider.js")).MockProvider(12,{submitReadbackCredits:51});const engine=new JobEngine(x.storage,new Map([["mock",drifting]]));const job=await engine.create(request(x.asset,"drift"));await expect(engine.run(job.id)).rejects.toMatchObject({code:"COST_LIMIT_EXCEEDED"});expect(drifting.submitCount).toBe(0);expect(x.storage.getIntent(job.id)).not.toBeNull();x.storage.close();});
+});
+
+

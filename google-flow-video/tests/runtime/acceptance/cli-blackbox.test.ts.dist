@@ -1,0 +1,281 @@
+import { execFile } from "node:child_process";
+import { mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
+import { promisify } from "node:util";
+import Database from "better-sqlite3";
+import { describe, expect, it } from "vitest";
+
+const runFile = promisify(execFile);
+const root = resolve(import.meta.dirname, "../..");
+const tsx = resolve(root, "node_modules/.bin/tsx");
+
+type RunResult = { code: number; stdout: string; stderr: string; json: any };
+
+function externalRequest(key: string, outputs = 1) {
+  return {
+    backend: "mock",
+    idempotency_key: key,
+    project: { name: "acceptance-empty-project", reuse: false },
+    mode: "text_to_video",
+    prompt: "fixture prompt; no external generation",
+    prompt_mode: "verbatim",
+    model: "fixture-model",
+    aspect_ratio: "16:9",
+    duration_seconds: 4,
+    resolution: "360p",
+    outputs,
+    download: { enabled: false, format: "mp4" },
+    cost_policy: { max_credits: 50, confirm_above: 50, reject_when_unknown: true },
+  };
+}
+
+function existingBrowserRequest(key: string) {
+  return { ...externalRequest(key), backend: "flow_ui", project: { name: "https://flow.google.com/project/fixture-project", reuse: true } };
+}
+
+function existingBrowserObservation(overrides: Record<string, unknown> = {}) {
+  return {
+    browserId: "browser-fixture", tabId: "tab-fixture",
+    url: "https://flow.google.com/project/fixture-project",
+    projectRef: "https://flow.google.com/project/fixture-project",
+    observedAt: new Date().toISOString(),
+    configuration: { model: "fixture-model", mode: "text_to_video", aspectRatio: "16:9", durationSeconds: 4, resolution: "360p", outputs: 1 },
+    totalCredits: 4, availableCredits: 800, visibleAccountContext: `account-sha256:${"a".repeat(64)}`,
+    ...overrides,
+  };
+}
+
+async function invoke(dir: string, args: string[], extraEnv: Record<string,string> = {}): Promise<RunResult> {
+  const env = { ...process.env, FLOWBRIDGE_DB_PATH: join(dir, "flowbridge.sqlite"), ...extraEnv };
+  try {
+    const result = await runFile(tsx, ["apps/flowctl/src/index.ts", ...args], { cwd: root, env });
+    const stdout = result.stdout.trim();
+    return { code: 0, stdout, stderr: result.stderr, json: JSON.parse(stdout) };
+  } catch (error: any) {
+    const stdout = String(error.stdout ?? "").trim();
+    return { code: Number(error.code), stdout, stderr: String(error.stderr ?? ""), json: stdout ? JSON.parse(stdout) : null };
+  }
+}
+
+async function requestFile(dir: string, request: object) {
+  const path = join(dir, "request.json");
+  await writeFile(path, `${JSON.stringify(request)}\n`);
+  return path;
+}
+async function synthesize(path:string, size="640x360", seconds=4){await runFile("ffmpeg",["-y","-v","error","-f","lavfi","-i",`color=c=green:s=${size}:r=24:d=${seconds}`,"-c:v","libx264","-pix_fmt","yuv420p",path]);}
+
+describe("flowctl black-box boundary", () => {
+  it("requires an existing Codex browser session without launching a profile", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "flowbridge-cli-existing-"));
+    const result = await invoke(dir, ["credits"]);
+    expect(result.code).not.toBe(0);
+    expect(result.json.error).toMatchObject({ details: { reason: "EXISTING_SESSION_REQUIRED" } });
+  });
+
+  it("persists intent before a one-shot existing-browser ticket and disables Generate afterward", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "flowbridge-cli-existing-"));
+    const request = await requestFile(dir, existingBrowserRequest("existing-ticket"));
+    const created = await invoke(dir, ["generate", "--file", request, "--no-run"]);
+    expect(created.code).toBe(0);
+    const observationPath = join(dir, "observation.json");
+    await writeFile(observationPath, `${JSON.stringify(existingBrowserObservation())}\n`);
+    const prepared = await invoke(dir, ["browser", "prepare", "--job", created.json.id, "--observation", observationPath]);
+    expect(prepared.json).toMatchObject({ action: "GENERATE", status: "ISSUED", browserId: "browser-fixture", tabId: "tab-fixture" });
+    const db = new Database(join(dir, "flowbridge.sqlite"), { readonly: true });
+    expect((db.prepare("SELECT count(*) AS n FROM submission_attempts WHERE job_id=?").get(created.json.id) as any).n).toBe(1);
+    db.close();
+    const claimed = await invoke(dir, ["browser", "claim", "--ticket", prepared.json.ticketId, "--observation", observationPath]);
+    expect(claimed.json.status).toBe("CLAIMED");
+    const secondClaim = await invoke(dir, ["browser", "claim", "--ticket", prepared.json.ticketId, "--observation", observationPath]);
+    expect(secondClaim.code).not.toBe(0);
+    const receipt = await invoke(dir, ["browser", "receipt", "--ticket", prepared.json.ticketId, "--outcome", "clicked"]);
+    expect(receipt.json.state).toBe("GENERATING");
+    const recovery = await invoke(dir, ["browser", "prepare", "--job", created.json.id, "--observation", observationPath]);
+    expect(recovery.json.action).toBe("RECONCILE");
+  });
+
+  it("rejects a changed existing-browser tab before claiming its action ticket", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "flowbridge-cli-existing-"));
+    const request = await requestFile(dir, existingBrowserRequest("existing-binding"));
+    const created = await invoke(dir, ["generate", "--file", request, "--no-run"]);
+    const observationPath = join(dir, "observation.json");
+    await writeFile(observationPath, `${JSON.stringify(existingBrowserObservation())}\n`);
+    const prepared = await invoke(dir, ["browser", "prepare", "--job", created.json.id, "--observation", observationPath]);
+    const changedPath = join(dir, "changed-observation.json");
+    await writeFile(changedPath, `${JSON.stringify(existingBrowserObservation({ tabId: "replacement-tab" }))}\n`);
+    const result = await invoke(dir, ["browser", "claim", "--ticket", prepared.json.ticketId, "--observation", changedPath]);
+    expect(result.code).not.toBe(0);
+    expect(result.json.error.code).toBe("UNSUPPORTED_COMBINATION");
+  });
+  it("accepts the PRD snake_case request and emits one JSON document", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "flowbridge-cli-"));
+    const file = await requestFile(dir, externalRequest("snake-case-20"));
+    const result = await invoke(dir, ["generate", "--file", file, "--enable-mock", "--mock-cost", "50"]);
+    expect(result.code).toBe(0);
+    expect(result.stderr).toBe("");
+    expect(JSON.parse(result.stdout)).toEqual(result.json);
+    expect(result.json).toMatchObject({ provider: "mock", idempotencyKey: "snake-case-20", state: "GENERATING" });
+  });
+
+  it.each([["51", "COST_LIMIT_EXCEEDED"], ["NaN", "COST_UNKNOWN"]])("blocks cost %s before a submission intent", async (cost, code) => {
+    const dir = await mkdtemp(join(tmpdir(), "flowbridge-cli-"));
+    const file = await requestFile(dir, externalRequest(`blocked-${cost}`));
+    const result = await invoke(dir, ["generate", "--file", file, "--enable-mock", "--mock-cost", cost]);
+    expect(result.code).toBe(4);
+    expect(result.json.error.code).toBe(code);
+    const db = new Database(join(dir, "flowbridge.sqlite"), { readonly: true });
+    expect((db.prepare("SELECT count(*) AS n FROM submission_attempts").get() as any).n).toBe(0);
+    db.close();
+  });
+
+  it("blocks a known insufficient balance before intent and provider effect", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "flowbridge-cli-"));
+    const file = await requestFile(dir, externalRequest("insufficient-balance"));
+    const effectLog = join(dir, "effects.jsonl");
+    const result = await invoke(dir, ["generate", "--file", file, "--enable-mock", "--mock-cost", "12", "--mock-balance", "5", "--mock-effect-log", effectLog]);
+    expect(result.code).toBe(5);
+    expect(result.json.error).toMatchObject({code:"INSUFFICIENT_CREDITS",details:{availableCredits:5,totalCredits:12}});
+    const db = new Database(join(dir, "flowbridge.sqlite"), { readonly: true });
+    expect((db.prepare("SELECT count(*) AS n FROM submission_attempts").get() as any).n).toBe(0);
+    db.close();
+    await expect(readFile(effectLog,"utf8")).rejects.toMatchObject({code:"ENOENT"});
+  });
+
+  it("blocks a balance drop at final readback before the provider effect", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "flowbridge-cli-"));
+    const file = await requestFile(dir, externalRequest("final-insufficient-balance"));
+    const effectLog = join(dir, "effects.jsonl");
+    const result = await invoke(dir, ["generate", "--file", file, "--enable-mock", "--mock-cost", "12", "--mock-balance", "20", "--mock-submit-balance", "5", "--mock-effect-log", effectLog]);
+    expect(result.code).toBe(5);
+    expect(result.json.error).toMatchObject({code:"INSUFFICIENT_CREDITS",details:{availableCredits:5,totalCredits:12}});
+    await expect(readFile(effectLog,"utf8")).rejects.toMatchObject({code:"ENOENT"});
+  });
+
+  it("requires explicit mock opt-in", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "flowbridge-cli-"));
+    const file = await requestFile(dir, externalRequest("mock-opt-in"));
+    const result = await invoke(dir, ["generate", "--file", file]);
+    expect(result.code).toBe(2);
+    expect(result.json.error.code).toBe("PROVIDER_UNAVAILABLE");
+  });
+
+  it("persists one intent and reconciles instead of submitting the same key again", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "flowbridge-cli-"));
+    const file = await requestFile(dir, externalRequest("restart-same-key"));
+    const first = await invoke(dir, ["generate", "--file", file, "--enable-mock", "--mock-cost", "4"]);
+    const second = await invoke(dir, ["generate", "--file", file, "--enable-mock", "--mock-cost", "4"]);
+    expect(first.code).toBe(0);
+    expect(second.code).toBe(0);
+    expect(second.json.state).toBe("GENERATING");
+    const db = new Database(join(dir, "flowbridge.sqlite"), { readonly: true });
+    expect((db.prepare("SELECT count(*) AS n FROM jobs").get() as any).n).toBe(1);
+    expect((db.prepare("SELECT count(*) AS n FROM submission_attempts").get() as any).n).toBe(1);
+    const requestJson = (db.prepare("SELECT request_json FROM jobs").get() as any).request_json;
+    expect(JSON.parse(requestJson).authorizationContext).toEqual({ source: "current_conversation", explicitlyRequestedGeneration: true });
+    db.close();
+  });
+
+  it("conflicts when immutable PRD input changes under the same key", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "flowbridge-cli-"));
+    const file = await requestFile(dir, externalRequest("changed-request"));
+    expect((await invoke(dir, ["generate", "--file", file, "--enable-mock"])).code).toBe(0);
+    await writeFile(file, `${JSON.stringify({ ...externalRequest("changed-request"), prompt: "changed fixture prompt" })}\n`);
+    const conflict = await invoke(dir, ["generate", "--file", file, "--enable-mock"]);
+    expect(conflict.code).toBe(2);
+    expect(conflict.json.error.code).toBe("IDEMPOTENCY_CONFLICT");
+  });
+
+  it("survives a real process exit after the mock side effect without a second submit", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "flowbridge-cli-crash-"));
+    const file = await requestFile(dir, externalRequest("crash-after-effect"));
+    const effectLog = join(dir, "effects.ndjson");
+    const crashed = await invoke(dir, ["generate", "--file", file, "--enable-mock", "--mock-cost", "4", "--mock-effect-log", effectLog, "--mock-crash", "after_mock_submit_effect"]);
+    expect(crashed.code).toBe(86);
+    expect(crashed.stdout).toBe("");
+    const recovered = await invoke(dir, ["generate", "--file", file, "--enable-mock", "--mock-cost", "4", "--mock-effect-log", effectLog]);
+    expect(recovered.code).toBe(8);
+    expect(recovered.json.state).toBe("SUBMISSION_UNCERTAIN");
+    expect((await readFile(effectLog, "utf8")).trim().split("\n")).toHaveLength(1);
+    const db = new Database(join(dir, "flowbridge.sqlite"), { readonly: true });
+    expect((db.prepare("SELECT count(*) AS n FROM submission_attempts").get() as any).n).toBe(1);
+    db.close();
+  });
+
+  it("blocks a final visible-price drift from 12 to 21 before the mock effect", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "flowbridge-cli-drift-"));
+    const file = await requestFile(dir, externalRequest("price-drift"));
+    const effectLog = join(dir, "effects.ndjson");
+    const result = await invoke(dir, ["generate", "--file", file, "--enable-mock", "--mock-cost", "12", "--mock-submit-cost", "51", "--mock-effect-log", effectLog]);
+    expect(result.code).toBe(4);
+    expect(result.json.error.code).toBe("COST_LIMIT_EXCEEDED");
+    await expect(readFile(effectLog, "utf8")).rejects.toMatchObject({ code:"ENOENT" });
+  });
+
+  it("completes wait, real media validation, persistence and JSON readback through the CLI", async () => {
+    const dir=await mkdtemp(join(tmpdir(),"flowbridge-cli-e2e-")),source=join(dir,"staged.mp4"),output=join(dir,"out");await synthesize(source);
+    const body={...externalRequest("mock-complete"),download:{enabled:true,directory:output,format:"mp4"}};
+    const file=await requestFile(dir,body);
+    const result=await invoke(dir,["generate","--file",file,"--wait","--timeout-ms","5000","--enable-mock","--mock-cost","4","--mock-source-media",source]);
+    expect(result.code).toBe(0);expect(result.json.state).toBe("COMPLETED");expect(result.json.assets).toHaveLength(1);
+    const asset=result.json.assets[0];expect(asset.localPath).toMatch(/^\//);expect(asset.sha256).toMatch(/^[a-f0-9]{64}$/);expect(asset.metadata.fullDecode).toMatchObject({ok:true,validator:"ffmpeg"});expect(asset.metadata.mediaProbe.streams.length).toBeGreaterThan(0);expect(asset.metadata.sidecarPath).toMatch(/^\//);
+  },20_000);
+
+  it("resumes the original intent after process exit and completes without a second effect",async()=>{
+    const dir=await mkdtemp(join(tmpdir(),"flowbridge-cli-resume-")),source=join(dir,"staged.mp4"),output=join(dir,"out"),effects=join(dir,"effects.ndjson");await synthesize(source);
+    const file=await requestFile(dir,{...externalRequest("mock-resume-complete"),download:{enabled:true,directory:output,format:"mp4"}});
+    const crashed=await invoke(dir,["generate","--file",file,"--wait","--enable-mock","--mock-cost","4","--mock-source-media",source,"--mock-effect-log",effects,"--mock-crash","after_mock_submit_effect"]);expect(crashed.code).toBe(86);
+    const event=JSON.parse((await readFile(effects,"utf8")).trim());
+    const resumed=await invoke(dir,["resume",event.jobId,"--wait","--timeout-ms","5000","--enable-mock","--mock-cost","4","--mock-source-media",source,"--mock-effect-log",effects]);
+    expect(resumed.code).toBe(0);expect(resumed.json.state).toBe("COMPLETED");expect((await readFile(effects,"utf8")).trim().split("\n")).toHaveLength(1);
+    const db=new Database(join(dir,"flowbridge.sqlite"),{readonly:true});expect((db.prepare("SELECT count(*) n FROM submission_attempts").get() as any).n).toBe(1);db.close();
+  },20_000);
+
+  it("retries only a failed download and never appends another submit effect",async()=>{
+    const dir=await mkdtemp(join(tmpdir(),"flowbridge-cli-download-")),source=join(dir,"staged.mp4"),output=join(dir,"out"),effects=join(dir,"effects.ndjson");await writeFile(source,"<html>fixture error</html>");
+    const file=await requestFile(dir,{...externalRequest("mock-download-retry"),download:{enabled:true,directory:output,format:"mp4"}});
+    const failed=await invoke(dir,["generate","--file",file,"--wait","--timeout-ms","5000","--enable-mock","--mock-cost","4","--mock-source-media",source,"--mock-effect-log",effects]);
+    expect(failed.code).toBe(2);expect(failed.json.error.code).toBe("DOWNLOAD_FAILED");const event=JSON.parse((await readFile(effects,"utf8")).trim());
+    await synthesize(source);
+    const retried=await invoke(dir,["download",event.jobId,"--enable-mock","--mock-cost","4"]);expect(retried.code).toBe(0);expect(retried.json.state).toBe("COMPLETED");expect((await readFile(effects,"utf8")).trim().split("\n")).toHaveLength(1);
+  },20_000);
+
+  it("keeps a still-generating job non-complete when bounded wait expires",async()=>{
+    const dir=await mkdtemp(join(tmpdir(),"flowbridge-cli-timeout-")),file=await requestFile(dir,externalRequest("mock-timeout"));
+    const result=await invoke(dir,["generate","--file",file,"--wait","--timeout-ms","25","--enable-mock","--mock-cost","4"]);
+    expect(result.code).toBe(0);expect(result.json.state).toBe("GENERATING");expect(result.json.assets??[]).toHaveLength(0);
+  });
+
+  it("stops at GENERATED without a local path when download is disabled",async()=>{
+    const dir=await mkdtemp(join(tmpdir(),"flowbridge-cli-no-download-")),source=join(dir,"staged.mp4"),file=await requestFile(dir,externalRequest("mock-generated-only"));await synthesize(source);
+    const result=await invoke(dir,["generate","--file",file,"--wait","--timeout-ms","5000","--enable-mock","--mock-cost","4","--mock-source-media",source]);
+    expect(result.code).toBe(0);expect(result.json.state).toBe("GENERATED");expect(result.json.assets).toHaveLength(1);expect(result.json.assets[0].localPath).toBeUndefined();
+  },20_000);
+
+  it("reads one visible balance with source and capture time through the CLI",async()=>{
+    const dir=await mkdtemp(join(tmpdir(),"flowbridge-cli-readonly-"));const url=`data:text/html,${encodeURIComponent("<main><div>Credits remaining: 800</div></main>")}`;
+    const result=await invoke(dir,["credits"],{NODE_ENV:"test",FLOWBRIDGE_TEST_READONLY_URL:url});expect(result.code).toBe(0);expect(result.json).toMatchObject({credits:800,balance:800,source:"page_visible"});expect(Number.isNaN(Date.parse(result.json.capturedAt))).toBe(false);
+  },20_000);
+
+  it("rejects ambiguous visible balances instead of guessing",async()=>{
+    const dir=await mkdtemp(join(tmpdir(),"flowbridge-cli-readonly-"));const url=`data:text/html,${encodeURIComponent("<main><div>Credits remaining: 800</div><div>Credits available: 700</div></main>")}`;
+    const result=await invoke(dir,["credits"],{NODE_ENV:"test",FLOWBRIDGE_TEST_READONLY_URL:url});expect(result.code).toBe(4);expect(result.json).toMatchObject({credits:null,source:"unknown",reason:"BALANCE_NOT_UNIQUELY_VISIBLE"});
+  },20_000);
+
+  it("returns only the currently observed capability combination",async()=>{
+    const dir=await mkdtemp(join(tmpdir(),"flowbridge-cli-readonly-"));const html='<main><label>Generation type<select aria-label="Generation type"><option value="text_to_video" selected>Text to video</option></select></label><label>Model<select aria-label="Model"><option selected>omni-flash-1.1</option></select></label><label>Orientation<select aria-label="Orientation"><option selected>16:9</option></select></label><label>Duration<select aria-label="Duration"><option selected>4</option></select></label><label>Resolution<select aria-label="Resolution"><option selected>360p</option></select></label><label>Outputs<select aria-label="Outputs"><option selected>1</option></select></label></main>';const url=`data:text/html,${encodeURIComponent(html)}`;
+    const result=await invoke(dir,["capabilities"],{NODE_ENV:"test",FLOWBRIDGE_TEST_READONLY_URL:url});expect(result.code).toBe(0);expect(result.json).toMatchObject({source:"page_visible",capabilities:{model:"omni-flash-1.1",mode:"text_to_video",aspectRatio:"16:9",durationSeconds:4,resolution:"360p",outputs:1}});expect(Number.isNaN(Date.parse(result.json.capturedAt))).toBe(false);
+  },20_000);
+
+  it("returns unknown capabilities when a required visible control is missing",async()=>{
+    const dir=await mkdtemp(join(tmpdir(),"flowbridge-cli-readonly-"));const url=`data:text/html,${encodeURIComponent('<main><label>Model<select aria-label="Model"><option>omni-flash-1.1</option></select></label></main>')}`;
+    const result=await invoke(dir,["capabilities"],{NODE_ENV:"test",FLOWBRIDGE_TEST_READONLY_URL:url});expect(result.code).toBe(6);expect(result.json.source).toBe("unknown");expect(result.json.capabilities).toBeNull();
+  },20_000);
+
+  it("reports an isolated busy profile without stealing its lock",async()=>{
+    const dir=await mkdtemp(join(tmpdir(),"flowbridge-cli-busy-")),profile=join(dir,"profile");await (await import("node:fs/promises")).mkdir(profile);const lock=join(profile,".flowbridge.lock");await writeFile(lock,"fixture-owner\n");
+    const result=await invoke(dir,["credits"],{NODE_ENV:"test",FLOWBRIDGE_TEST_PROFILE_DIR:profile,FLOWBRIDGE_TEST_READONLY_URL:`data:text/html,<main></main>`});expect(result.code).toBe(4);expect(result.json).toMatchObject({credits:null,source:"unknown",reason:"PROFILE_BUSY"});expect(await readFile(lock,"utf8")).toBe("fixture-owner\n");
+  },20_000);
+});
+
+

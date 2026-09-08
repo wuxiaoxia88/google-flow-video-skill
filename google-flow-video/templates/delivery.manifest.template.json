@@ -1,0 +1,29 @@
+{
+  "schema_version": 1,
+  "run_id": "replace-with-user-run-id",
+  "project_name": "replace-with-user-project-name",
+  "creative": {
+    "original_prompt": { "path": "creative-master.txt", "sha256": "replace-with-sha256" },
+    "audio_override": { "path": "audio-override.txt", "sha256": "replace-with-sha256" }
+  },
+  "timeline": { "duration_seconds": 8, "shots": [
+    { "start_seconds": 0, "end_seconds": 8, "source_duration_seconds": 8, "visual_scope": "replace with only this shot's visual and action scope", "model": "replace-with-currently-visible-flow-model", "provider_duration_seconds": 8 }
+  ] },
+  "delivery": { "aspect_ratio": "16:9", "resolution": "720p", "fps": 24 },
+  "tts": {
+    "provider": "MMX",
+    "model": "replace-with-provider-model",
+    "voice": "replace-with-voice-id",
+    "parameters": { "replace": "with-actual-settings" },
+    "single_take": true,
+    "parameters": { "language": "zh" },
+    "output_path": "full_dialogue_take.wav"
+  },
+  "stems": {
+    "video": { "path": "video_only.mp4", "sha256": "replace-with-sha256" },
+    "music": { "path": "music_master.wav", "sha256": "replace-with-sha256" },
+    "voice": { "path": "voice_master.wav", "sha256": "replace-with-sha256", "line_timings": [
+      { "text": "replace-with-the-first-dialogue-line", "start_seconds": 0.2, "end_seconds": 3.0, "source_start_seconds": 0.0, "source_end_seconds": 2.8 }
+    ] }
+  }
+}

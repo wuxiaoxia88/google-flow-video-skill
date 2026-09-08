@@ -1,0 +1,4 @@
+interface:
+  display_name: "Google Flow Video"
+  short_description: "Generate Flow videos with safe credits and unified Chinese redubbing"
+  default_prompt: "Use $google-flow-video to prepare a Google Flow video job with picture plus music, then a unified Chinese voiceover."

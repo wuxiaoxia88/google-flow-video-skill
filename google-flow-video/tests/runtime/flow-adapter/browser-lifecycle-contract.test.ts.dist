@@ -1,0 +1,77 @@
+import { readFile } from "node:fs/promises";
+import { describe, expect, it, vi } from "vitest";
+import type { BrowserPage } from "../../packages/flow-adapter/src/browser-session.js";
+import { FlowUiProvider, borrowExistingFlowTab, ownFlowPage } from "../../packages/flow-adapter/src/flow-ui-provider.js";
+import type { VideoGenerationRequest } from "../../packages/contracts/src/index.js";
+
+const page = {} as BrowserPage;
+const request: VideoGenerationRequest = {
+  provider: "flow_ui", idempotencyKey: "lifecycle", project: { name: "p", reuse: true }, mode: "text_to_video", prompt: "fixture", promptMode: "verbatim", model: "fixture", aspectRatio: "16:9", durationSeconds: 4, resolution: "360p", outputs: 1,
+  costPolicy: { maxCredits: 50, confirmAbove: 50, rejectWhenUnknown: true }, authorizationContext: { source: "current_conversation", explicitlyRequestedGeneration: true },
+};
+const context = { jobId: "j", attemptId: "a", fencingToken: "f", requestHash: "h", projectRef: "https://flow.google.com/project/p", submissionEvidence: { beforeAssetRefs: [] } };
+
+function observedPage(url: string, assets: Array<{ ref: string; status: "generating" | "generated" | "failed" }> = []) {
+  const goto = vi.fn(async () => undefined);
+  const cards = {
+    count: async () => assets.length,
+    nth: (index: number) => ({ count: async () => 1, getAttribute: async (name: string) => name === "data-asset-id" ? assets[index]?.ref ?? null : name === "data-asset-status" ? assets[index]?.status ?? null : null }),
+  };
+  const observed = { url: () => url, goto, locator: () => cards } as unknown as BrowserPage;
+  return { observed, goto };
+}
+
+describe("browser lifecycle capability contract", () => {
+  it("makes release of a borrowed existing tab inert and idempotent", async () => {
+    const forbidden = { launch: vi.fn(), newPage: vi.fn(), closeBrowser: vi.fn(), closeTab: vi.fn(), disconnect: vi.fn() };
+    const lease = borrowExistingFlowTab(page);
+    await lease.release();
+    await lease.release();
+    expect(lease.ownership).toBe("borrowed_existing_tab");
+    expect(Object.keys(lease).sort()).toEqual(["ownership", "page", "release"].sort());
+    for (const operation of Object.values(forbidden)) expect(operation).not.toHaveBeenCalled();
+  });
+
+  it("disposes an owned fixture exactly once without exposing disposal as borrowed-tab cleanup", async () => {
+    const dispose = vi.fn(async () => undefined);
+    const lease = ownFlowPage(page, "owned_test_fixture", dispose);
+    await lease.release();
+    await lease.release();
+    expect(dispose).toHaveBeenCalledTimes(1);
+  });
+
+  it("rejects an unbranded adapter instead of accepting a hidden close callback", async () => {
+    const hiddenClose = vi.fn(async () => undefined);
+    const provider = new FlowUiProvider({ acquirePage: async () => ({ page, ownership: "borrowed_existing_tab", release: hiddenClose } as never) });
+    await expect(provider.readBalance()).resolves.toMatchObject({ source: "unknown", reason: "UNSAFE_BROWSER_ADAPTER" });
+    expect(hiddenClose).not.toHaveBeenCalled();
+  });
+
+  it("keeps provider production code free of browser launch, new-page, close, and disconnect capabilities", async () => {
+    const source = await readFile(new URL("../../packages/flow-adapter/src/flow-ui-provider.ts", import.meta.url), "utf8");
+    expect(source).not.toMatch(/chromium|\.launch\s*\(|\.newPage\s*\(|\.close\s*\(|\.disconnect\s*\(/);
+    expect(source).toContain("borrowExistingFlowTab");
+    expect(source).toContain("lease.release()");
+  });
+
+  it("reconciles an already-bound project editor without navigating the borrowed tab", async () => {
+    const { observed, goto } = observedPage("https://flow.google.com/project/p/edit/scene-1", [{ ref: "new", status: "generated" }]);
+    const provider = new FlowUiProvider({ acquirePage: async () => borrowExistingFlowTab(observed) });
+    await expect(provider.reconcile(request, context)).resolves.toMatchObject({ complete: true, assets: [{ providerAssetRef: "new" }] });
+    expect(goto).not.toHaveBeenCalled();
+  });
+
+  it("stops on a different borrowed project without navigating it", async () => {
+    const { observed, goto } = observedPage("https://flow.google.com/project/other");
+    const provider = new FlowUiProvider({ acquirePage: async () => borrowExistingFlowTab(observed) });
+    await expect(provider.reconcile(request, context)).rejects.toMatchObject({ code: "RESULT_AMBIGUOUS", details: { reason: "BORROWED_TAB_PROJECT_MISMATCH" } });
+    expect(goto).not.toHaveBeenCalled();
+  });
+
+  it("stops when borrowed-tab identity is missing without navigation or replacement", async () => {
+    const { observed, goto } = observedPage("");
+    const provider = new FlowUiProvider({ acquirePage: async () => borrowExistingFlowTab(observed) });
+    await expect(provider.reconcile(request, context)).rejects.toMatchObject({ code: "RESULT_AMBIGUOUS", details: { reason: "BORROWED_TAB_IDENTITY_UNAVAILABLE" } });
+    expect(goto).not.toHaveBeenCalled();
+  });
+});

@@ -1,0 +1,160 @@
+import { mkdtemp } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { describe, expect, it } from "vitest";
+import type { ExistingBrowserObservation, VideoGenerationRequest } from "../../packages/contracts/src/index.js";
+import { JobEngine } from "../../packages/job-engine/src/index.js";
+import { Storage } from "../../packages/storage/src/index.js";
+
+const request = (key: string): VideoGenerationRequest => ({
+  provider: "flow_ui",
+  idempotencyKey: key,
+  project: { name: "https://flow.google.com/project/fixture-project", reuse: true },
+  mode: "text_to_video",
+  prompt: "fixture prompt",
+  promptMode: "verbatim",
+  model: "fixture-model",
+  aspectRatio: "16:9",
+  durationSeconds: 4,
+  resolution: "360p",
+  outputs: 1,
+  download: { enabled: false },
+  costPolicy: { maxCredits: 50, confirmAbove: 50, rejectWhenUnknown: true },
+  authorizationContext: { source: "current_conversation", explicitlyRequestedGeneration: true },
+});
+
+const observation = (overrides: Partial<ExistingBrowserObservation> = {}): ExistingBrowserObservation => ({
+  browserId: "browser-fixture",
+  tabId: "tab-fixture",
+  url: "https://flow.google.com/project/fixture-project",
+  projectRef: "https://flow.google.com/project/fixture-project",
+  observedAt: new Date().toISOString(),
+  configuration: { model: "fixture-model", mode: "text_to_video", aspectRatio: "16:9", durationSeconds: 4, resolution: "360p", outputs: 1 },
+  totalCredits: 50,
+  availableCredits: 1035,
+  visibleAccountContext: `account-sha256:${"a".repeat(64)}`,
+  ...overrides,
+});
+
+async function setup(key: string) {
+  const dir = await mkdtemp(join(tmpdir(), "flowbridge-session-safety-"));
+  const storage = new Storage(join(dir, "flowbridge.sqlite"));
+  const engine = new JobEngine(storage, new Map());
+  const job = await engine.create(request(key));
+  return { storage, engine, job };
+}
+
+describe("existing-browser session safety acceptance", () => {
+  it("does not issue a Generate or reconcile ticket for a cancelled job", async () => {
+    const x = await setup("cancelled-ticket");
+    x.engine.cancel(x.job.id);
+    expect(() => x.engine.prepareExistingBrowser(x.job.id, observation())).toThrow(/cancel/i);
+    expect(x.storage.db.prepare("SELECT count(*) AS n FROM browser_execution_tickets").get()).toMatchObject({ n: 0 });
+    x.storage.close();
+  });
+
+  it("keeps a Pro-only read-only observation out of Generate ticketing", async () => {
+    const x = await setup("plan-label-not-fingerprint");
+    expect(() => x.engine.prepareExistingBrowser(x.job.id, observation({ visibleAccountContext: "Pro" }))).toThrow(/fingerprint/i);
+    expect(x.storage.getIntent(x.job.id)).toBeNull();
+    x.storage.close();
+  });
+
+  it("rejects a claim when the bound account context drifts after ticket issue", async () => {
+    const x = await setup("snapshot-drift");
+    const ticket = x.engine.prepareExistingBrowser(x.job.id, observation());
+    expect(() => x.engine.claimExistingBrowser(ticket.ticketId, observation({ visibleAccountContext: `account-sha256:${"b".repeat(64)}` }))).toThrow(/changed|snapshot|account/i);
+    expect(x.storage.getBrowserTicket(ticket.ticketId)?.status).toBe("ISSUED");
+    x.storage.close();
+  });
+
+  it("rejects a claim when two accounts share the same plan label but fingerprint differs", async () => {
+    const x = await setup("account-fingerprint-drift");
+    const first = "account-sha256:" + "a".repeat(64);
+    const second = "account-sha256:" + "b".repeat(64);
+    const ticket = x.engine.prepareExistingBrowser(x.job.id, observation({ visibleAccountContext: first }));
+    expect(() => x.engine.claimExistingBrowser(ticket.ticketId, observation({ visibleAccountContext: second }))).toThrow(/changed|snapshot|account/i);
+    expect(x.storage.getBrowserTicket(ticket.ticketId)?.status).toBe("ISSUED");
+    x.storage.close();
+  });
+
+  it("cannot claim a Generate ticket after the job is cancelled", async () => {
+    const x = await setup("cancel-after-issue");
+    const ticket = x.engine.prepareExistingBrowser(x.job.id, observation());
+    x.engine.cancel(x.job.id);
+    expect(() => x.engine.claimExistingBrowser(ticket.ticketId, observation())).toThrow(/cancel|state|stale/i);
+    expect(x.storage.getBrowserTicket(ticket.ticketId)?.status).toBe("ISSUED");
+    x.storage.close();
+  });
+
+  it("rejects an expired observation at the core existing-browser boundary", async () => {
+    const x = await setup("stale-observation");
+    const stale = observation({ observedAt: new Date(Date.now() - 601_000).toISOString() });
+    expect(() => x.engine.prepareExistingBrowser(x.job.id, stale)).toThrow(/stale|fresh|timestamp/i);
+    expect(x.storage.getIntent(x.job.id)).toBeNull();
+    x.storage.close();
+  });
+
+  it("rejects a ticket that is older than the ten minute claim window", async () => {
+    const x = await setup("expired-ticket");
+    const ticket = x.engine.prepareExistingBrowser(x.job.id, observation());
+    x.storage.db.prepare("UPDATE browser_execution_tickets SET issued_at=? WHERE id=?").run(new Date(Date.now() - 601_000).toISOString(), ticket.ticketId);
+    expect(() => x.engine.claimExistingBrowser(ticket.ticketId, observation())).toThrow(/expired|stale/i);
+    expect(x.storage.getBrowserTicket(ticket.ticketId)?.status).toBe("ISSUED");
+    x.storage.close();
+  });
+
+  it("accepts one receipt only for a claimed ticket", async () => {
+    const x = await setup("receipt-once");
+    const ticket = x.engine.prepareExistingBrowser(x.job.id, observation());
+    x.engine.claimExistingBrowser(ticket.ticketId, observation());
+    expect(x.engine.receiptExistingBrowser(ticket.ticketId, "clicked").state).toBe("GENERATING");
+    expect(() => x.engine.receiptExistingBrowser(ticket.ticketId, "clicked")).toThrow(/claimed|receipted|stale/i);
+    x.storage.close();
+  });
+
+  it("does not issue a second clickable ticket for another job on the same tab", async () => {
+    const x = await setup("same-tab-first");
+    const first = x.engine.prepareExistingBrowser(x.job.id, observation());
+    const secondJob = await x.engine.create(request("same-tab-second"));
+    expect(() => x.engine.prepareExistingBrowser(secondJob.id, observation())).toThrow(/tab|session|busy|fence|active/i);
+    expect(first.action).toBe("GENERATE");
+    expect(x.storage.db.prepare("SELECT count(*) AS n FROM browser_execution_tickets").get()).toMatchObject({ n: 1 });
+    x.storage.close();
+  });
+
+  it("allows the hard cap exactly at 50 Credits and blocks 51 before intent", async () => {
+    const atCap = await setup("cap-50");
+    expect(() => atCap.engine.prepareExistingBrowser(atCap.job.id, observation({ totalCredits: 50 }))).not.toThrow();
+    expect(atCap.storage.getIntent(atCap.job.id)).not.toBeNull();
+    atCap.storage.close();
+
+    const overCap = await setup("cap-51");
+    expect(() => overCap.engine.prepareExistingBrowser(overCap.job.id, observation({ totalCredits: 51 }))).toThrow(/20|exceed/i);
+    expect(overCap.storage.getIntent(overCap.job.id)).toBeNull();
+    overCap.storage.close();
+  });
+
+  it("reserves a budgeted browser step against its shared parent ledger", async () => {
+    const x = await setup("budgeted-setup");
+    x.storage.createBudgetLedger("run-budget");
+    const budgeted = { ...request("budgeted-step-a"), budgetContext: { ledgerId: "run-budget", stepKey: "step-a" } };
+    const budgetJob = await x.engine.create(budgeted);
+    x.engine.prepareExistingBrowser(budgetJob.id, observation({ tabId: "tab-budget-a", totalCredits: 30 }));
+    expect(x.storage.getBudgetLedger("run-budget")).toMatchObject({ reservedCredits: 30, consumedCredits: 0 });
+    const second = await x.engine.create({ ...request("budgeted-step-b"), budgetContext: { ledgerId: "run-budget", stepKey: "step-b" } });
+    expect(() => x.engine.prepareExistingBrowser(second.id, observation({ tabId: "tab-budget-b", totalCredits: 21 }))).toThrow(/reservation|budget|50/i);
+    expect(x.storage.getBudgetLedger("run-budget")).toMatchObject({ reservedCredits: 30 });
+    x.storage.close();
+  });
+
+  it("does not leave a second budget reservation when the tab lease is already held", async () => {
+    const x = await setup("lease-holder");
+    x.engine.prepareExistingBrowser(x.job.id, observation());
+    x.storage.createBudgetLedger("run-busy");
+    const second = await x.engine.create({ ...request("lease-contender"), budgetContext: { ledgerId: "run-busy", stepKey: "step-b" } });
+    expect(() => x.engine.prepareExistingBrowser(second.id, observation())).toThrow(/leased|busy|another/i);
+    expect(x.storage.getBudgetLedger("run-busy")).toMatchObject({ reservedCredits: 0 });
+    x.storage.close();
+  });
+});

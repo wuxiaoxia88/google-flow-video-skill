@@ -1,0 +1,29 @@
+{
+  "name": "flow-bridge",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@11.19.0",
+  "scripts": {
+    "build": "tsc -b",
+    "check": "tsc -b --pretty false && vitest run tests && python3 -m unittest discover -s tests/production -p 'test_*.py'",
+    "check:production": "python3 -m unittest discover -s tests/production -p 'test_*.py'",
+    "test": "vitest run tests",
+    "test:watch": "vitest tests",
+    "flowctl": "tsx apps/flowctl/src/index.ts",
+    "flowd": "tsx apps/flowd/src/index.ts"
+  },
+  "dependencies": {
+    "better-sqlite3": "^12.2.0",
+    "fastify": "^5.6.0",
+    "playwright": "^1.55.0",
+    "zod": "^4.1.5"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/node": "^22.18.0",
+    "tsx": "^4.20.5",
+    "typescript": "^5.9.2",
+    "vitest": "^3.2.4"
+  }
+}

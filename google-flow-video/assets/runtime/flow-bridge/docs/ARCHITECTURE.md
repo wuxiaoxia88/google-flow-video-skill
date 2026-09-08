@@ -1,0 +1,13 @@
+# Architecture
+
+M0 runs `flowctl -> JobEngine -> FlowProvider`; `flowd` exposes the same engine on loopback. SQLite stores immutable request hashes, input hashes, state events, runtime snapshots and submission intent. The mock provider is available only through an explicit test switch.
+
+`JobEngine.create` validates and freezes the request under a provider/idempotency-key uniqueness constraint. `run` asks the provider to prepare an exact runtime snapshot, enforces known whole-job cost at or below 50, and records intent before the provider effect. Once intent exists, subsequent runs reconcile only.
+
+The default Flow UI adapter uses a running, authenticated Flow tab supplied by Codex's supported browser tool. A standalone `flowctl` process has no Codex browser handle, so it must use the local executor-ticket bridge or return `EXISTING_SESSION_REQUIRED`; it must never claim to attach automatically. The bridge accepts only the canonical official project URL or its exact `/edit/<scene-id>` editor URL, derives and verifies the same project identity, and binds the current tab/session. It then carries `observation -> core validation -> atomic intent -> one-shot execution ticket -> final readback and click -> receipt`. Once intent exists, tickets disable Generate and permit observation, reconciliation and download only. The user tab is represented by a borrowed page lease whose release operation is inert; the provider is not given browser launch, new-tab, tab-close, browser-close, or disconnect capabilities. Repeated create, prepare, retry, recovery, success, failure, and disposal reuse the observed tab identity. Executor teardown drops only local data references.
+
+The adapter never launches a persistent context over daily Chrome User Data, copies cookies/tokens/profiles, enables a debugging port, restarts Chrome or installs an extension. A separate dedicated profile remains an explicit compatibility-test option only. A stale observed tab triggers one fresh inventory for the same user-opened project; no exact match ends as `EXISTING_SESSION_REQUIRED` with the visible UI unchanged. Live asset reconciliation remains conservative and incomplete, so no live result is claimed yet.
+
+Read-only balance and capability commands use the same provider boundary. Balance requires one unique visible value; capabilities returns one observed complete selection rather than an inferred matrix. Ambiguous DOM, missing controls, or a busy profile produce an explicit unknown result.
+
+`DownloadManager` stages an MP4, verifies stream metadata, dimensions, ratio, duration and frame-rate metadata with `ffprobe`, performs a full `ffmpeg -xerror` decode, and only then exposes the final file and sidecar. Invalid media cannot complete.

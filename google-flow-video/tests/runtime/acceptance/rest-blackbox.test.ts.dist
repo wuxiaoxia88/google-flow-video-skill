@@ -1,0 +1,82 @@
+import { spawn } from "node:child_process";
+import { mkdtemp, readFile, stat } from "node:fs/promises";
+import { createServer } from "node:net";
+import { request as httpRequest } from "node:http";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
+import { afterEach, describe, expect, it } from "vitest";
+
+const root = resolve(import.meta.dirname, "../..");
+const tsx = resolve(root, "node_modules/.bin/tsx");
+const children: Array<ReturnType<typeof spawn>> = [];
+afterEach(() => { for (const child of children.splice(0)) child.kill("SIGTERM"); });
+
+async function freePort(): Promise<number> {
+  return await new Promise((resolvePort, reject) => {
+    const server = createServer();
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", () => {
+      const address = server.address();
+      if (!address || typeof address === "string") return reject(new Error("No TCP port"));
+      server.close(error => error ? reject(error) : resolvePort(address.port));
+    });
+  });
+}
+
+async function startFlowd() {
+  const dir = await mkdtemp(join(tmpdir(), "flowbridge-rest-"));
+  const port = await freePort();
+  const tokenPath = join(dir, "token"), dbPath = join(dir, "db.sqlite");
+  const child = spawn(tsx, ["apps/flowd/src/index.ts"], { cwd: root, env: { ...process.env, FLOWBRIDGE_PORT: String(port), FLOWBRIDGE_TOKEN_PATH: tokenPath, FLOWBRIDGE_DB_PATH: dbPath, FLOWBRIDGE_ENABLE_MOCK: "1", FLOWBRIDGE_MOCK_COST: "4" }, stdio: ["ignore", "pipe", "pipe"] });
+  children.push(child);
+  let stderr = ""; child.stderr.on("data", data => stderr += data);
+  const startup = await new Promise<any>((resolveStartup, reject) => {
+    let text = "";
+    const timer = setTimeout(() => reject(new Error(`flowd timeout: ${stderr}`)), 5_000);
+    child.once("exit", code => { clearTimeout(timer); reject(new Error(`flowd exited ${code}: ${stderr}`)); });
+    child.stdout.on("data", data => {
+      text += data;
+      const newline = text.indexOf("\n");
+      if (newline >= 0) { clearTimeout(timer); resolveStartup(JSON.parse(text.slice(0, newline))); }
+    });
+  });
+  return { child, dir, port, tokenPath, dbPath, startup, token: (await readFile(tokenPath, "utf8")).trim() };
+}
+
+function request(key: string) {
+  return { backend:"mock", idempotency_key:key, project:{name:"rest-fixture",reuse:false}, mode:"text_to_video", prompt:"fixture", prompt_mode:"verbatim", model:"fixture-model", aspect_ratio:"16:9", duration_seconds:4, resolution:"360p", outputs:1, download:{enabled:false,format:"mp4"}, cost_policy:{max_credits:50,confirm_above:50,reject_when_unknown:true} };
+}
+
+async function rawGet(port: number, headers: Record<string,string>) {
+  return await new Promise<{status:number;json:any}>((resolveResponse,reject)=>{
+    const req=httpRequest({host:"127.0.0.1",port,path:"/v1/videos/none",method:"GET",headers},res=>{let body="";res.on("data",d=>body+=d);res.on("end",()=>resolveResponse({status:res.statusCode??0,json:JSON.parse(body)}));});
+    req.on("error",reject);req.end();
+  });
+}
+
+describe("flowd REST black-box boundary", () => {
+  it("exposes only minimal anonymous health and protects job reads/writes", async () => {
+    const x = await startFlowd();
+    expect(x.startup).toMatchObject({ ok:true, host:"127.0.0.1", port:x.port });
+    expect((await stat(x.tokenPath)).mode & 0o777).toBe(0o600);
+    expect(await (await fetch(`http://127.0.0.1:${x.port}/healthz`)).json()).toEqual({ ok:true });
+    expect((await fetch(`http://127.0.0.1:${x.port}/v1/videos/none`)).status).toBe(401);
+    const auth = { authorization:`Bearer ${x.token}`, "content-type":"application/json" };
+    const created = await fetch(`http://127.0.0.1:${x.port}/v1/videos`, { method:"POST", headers:auth, body:JSON.stringify(request("rest-one")) });
+    expect(created.status).toBe(200);
+    const job:any = await created.json(); expect(job).toMatchObject({ provider:"mock", state:"GENERATING" });
+    const read = await fetch(`http://127.0.0.1:${x.port}/v1/videos/${job.id}`, { headers:auth });
+    expect(read.status).toBe(200);
+    expect(await read.json()).toMatchObject({ id:job.id });
+  }, 20_000);
+
+  it("rejects invalid Host and cross-site Origin even with a valid token", async () => {
+    const x = await startFlowd();
+    const base = { authorization:`Bearer ${x.token}` };
+    const host = await rawGet(x.port,{...base,host:"evil.example"});
+    expect(host.status).toBe(403); expect(host.json.error.code).toBe("INVALID_HOST");
+    const origin = await fetch(`http://127.0.0.1:${x.port}/v1/videos/none`, { headers:{...base,origin:"https://evil.example"} });
+    expect(origin.status).toBe(403); expect((await origin.json() as any).error.code).toBe("INVALID_ORIGIN");
+  }, 20_000);
+});
+

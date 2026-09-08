@@ -1,0 +1,69 @@
+import { execFile } from "node:child_process";
+import { chmod, mkdtemp, readFile, stat, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { promisify } from "node:util";
+import { describe, expect, it } from "vitest";
+import { FlowBridgeError } from "../../packages/contracts/src/index.js";
+import { DownloadManager, type DownloadProvenance } from "../../packages/download-manager/src/index.js";
+
+const runFile = promisify(execFile);
+
+function provenance(overrides: Partial<DownloadProvenance> = {}): DownloadProvenance {
+  return {
+    jobId: "job_media_fixture",
+    projectName: "synthetic-test",
+    projectUrl: "fixture://empty-project",
+    modelRequested: "fixture-model",
+    modelActual: "fixture-model",
+    aspectRatio: "16:9",
+    durationSeconds: 4,
+    resolution: "360p",
+    promptSha256: "0".repeat(64),
+    inputAssets: [{ ordinal: 0, contentSha256: "1".repeat(64) }],
+    targetMatchEvidence: { provider_card_ref: "fixture-card-1", source: "local-media" },
+    ...overrides,
+  };
+}
+
+async function synthesize(path: string, size = "640x360", seconds = 4) {
+  await runFile("ffmpeg", ["-y", "-v", "error", "-f", "lavfi", "-i", `color=c=blue:s=${size}:r=24:d=${seconds}`, "-c:v", "libx264", "-pix_fmt", "yuv420p", path]);
+}
+
+describe("download media acceptance (synthetic local files only)", () => {
+  it("persists only after probe and full decode and writes a private sidecar", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "flowbridge-media-"));
+    const source = join(dir, "source.mp4"), output = join(dir, "out");
+    await synthesize(source);
+    const result = await new DownloadManager().persist(source, output, provenance());
+    expect(result.asset.localPath).toMatch(/\.mp4$/);
+    expect(result.fullDecode).toMatchObject({ ok: true, validator: "ffmpeg" });
+    expect((await stat(result.asset.localPath!)).size).toBeGreaterThan(0);
+    expect((await stat(result.sidecarPath)).mode & 0o777).toBe(0o600);
+    const sidecar = JSON.parse(await readFile(result.sidecarPath, "utf8"));
+    expect(sidecar).toMatchObject({ provider: "flow_ui", billing_source: "flow_ai_credits", credits_used: null });
+    expect(sidecar.input_assets).toEqual([{ ordinal: 0, content_sha256: "1".repeat(64) }]);
+    expect(sidecar.target_match_evidence.provider_card_ref).toBe("fixture-card-1");
+  }, 20_000);
+
+  it.each([
+    ["wrong-ratio", "360x640", 4, /aspect ratio/],
+    ["wrong-duration", "640x360", 2, /duration/],
+  ])("rejects %s media and never emits a final MP4", async (_name, size, seconds, message) => {
+    const dir = await mkdtemp(join(tmpdir(), "flowbridge-media-"));
+    const source = join(dir, "source.mp4"), output = join(dir, "out");
+    await synthesize(source, size as string, seconds as number);
+    await expect(new DownloadManager().persist(source, output, provenance())).rejects.toMatchObject({ code: "DOWNLOAD_FAILED", details: { cause: expect.stringMatching(message as RegExp) } });
+    const diagnostic = (await import("node:fs/promises")).readdir(output);
+    expect((await diagnostic).some(name => name.endsWith(".invalid.part"))).toBe(true);
+    expect((await diagnostic).some(name => name.endsWith(".mp4"))).toBe(false);
+  }, 20_000);
+
+  it("rejects an HTML body masquerading as MP4", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "flowbridge-media-"));
+    const source = join(dir, "source.mp4"), output = join(dir, "out");
+    await writeFile(source, "<html>download error</html>");
+    await chmod(source, 0o600);
+    await expect(new DownloadManager().persist(source, output, provenance())).rejects.toMatchObject({ code: "DOWNLOAD_FAILED" });
+  });
+});

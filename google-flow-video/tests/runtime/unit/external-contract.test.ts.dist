@@ -1,0 +1,10 @@
+import { describe,expect,it } from "vitest";
+import { normalizeExternalRequest } from "../../packages/contracts/src/index.js";
+
+describe("PRD external request contract",()=>{
+  it("maps snake_case and injects current-command authorization",()=>{
+    const value=normalizeExternalRequest({backend:"mock",project:{name:"p",reuse:true},mode:"text_to_video",prompt:"x",prompt_mode:"verbatim",model:"m",aspect_ratio:"9:16",duration_seconds:4,resolution:"360p",outputs:1,cost_policy:{max_credits:50,confirm_above:50,reject_when_unknown:true},idempotency_key:"key"});
+    expect(value).toMatchObject({provider:"mock",idempotencyKey:"key",aspectRatio:"9:16",durationSeconds:4,costPolicy:{maxCredits:50,confirmAbove:50,rejectWhenUnknown:true},authorizationContext:{explicitlyRequestedGeneration:true}});
+  });
+  it("rejects a budget above 50 at the boundary",()=>expect(()=>normalizeExternalRequest({backend:"mock",project:{name:"p"},mode:"text_to_video",prompt:"x",prompt_mode:"verbatim",model:"m",aspect_ratio:"9:16",duration_seconds:4,resolution:"360p",outputs:1,cost_policy:{max_credits:100,confirm_above:50},idempotency_key:"key"})).toThrow());
+});

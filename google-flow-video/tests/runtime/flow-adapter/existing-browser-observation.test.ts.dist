@@ -1,0 +1,61 @@
+import { describe, expect, it } from "vitest";
+import { FlowBridgeError } from "../../packages/contracts/src/index.js";
+import { InjectedExistingTabDriver, observationSnapshot, parseExistingBrowserObservation } from "../../packages/flow-adapter/src/index.js";
+
+const fixtureProject = "https://flow.google.com/project/00000000-0000-4000-8000-000000000001";
+const fixtureTab = "tab-fixture-current";
+const valid = () => ({
+  browserId: "browser-fixture", tabId: fixtureTab, url: fixtureProject,
+  observedAt: new Date().toISOString(),
+  configuration: { model: "omni-flash-1.1", mode: "text_to_video", aspectRatio: "16:9", durationSeconds: 4, resolution: "360p", outputs: 1 },
+  availableCredits: 800, totalCredits: 8, visibleAccountContext: "Google AI Pro",
+  projectRef: fixtureProject,
+  visibleAssetRefs: undefined, selectedSourceAssetRef: null,
+});
+
+describe("existing browser observation boundary", () => {
+  it("accepts and converts only current Flow UI facts into a core snapshot", () => {
+    const input = valid(); const observation = parseExistingBrowserObservation(input);
+    expect(observation).toEqual(input);
+    expect(observationSnapshot(observation)).toMatchObject({ configurationVerified: true, availableCredits: 800, totalCredits: 8, projectRef: valid().projectRef });
+  });
+  it("rejects observations older than the 60-second executor freshness window", () => {
+    expect(() => parseExistingBrowserObservation({ ...valid(), observedAt: new Date(Date.now() - 61_000).toISOString() })).toThrow(/stale|timestamp/i);
+  });
+  it("rejects non-Flow origins and project/url substitution", () => {
+    const wrongOrigin = valid(); wrongOrigin.url = "https://evil.example/project/x";
+    expect(() => parseExistingBrowserObservation(wrongOrigin)).toThrow(/canonical/i);
+    const mismatch = valid(); mismatch.projectRef = "https://flow.google.com/project/other";
+    expect(() => parseExistingBrowserObservation(mismatch)).toThrow(/same current Flow project/i);
+  });
+  it("accepts an exact editor scene URL while retaining the canonical projectRef",()=>{const scene={...valid(),url:`${valid().projectRef}/edit/00000000-0000-4000-8000-000000000002`};expect(parseExistingBrowserObservation(scene)).toMatchObject({url:scene.url,projectRef:valid().projectRef});});
+  it("rejects editor scenes from another project, arbitrary subpaths and forged origins",()=>{expect(()=>parseExistingBrowserObservation({...valid(),url:"https://flow.google.com/project/other/edit/scene"})).toThrow(/same current Flow project/i);for(const url of [`${valid().projectRef}/edit/scene/extra`,`${valid().projectRef}/settings`,`${valid().projectRef}/edit/scene?x=1`,"https://flow.google.com.evil.example/project/x/edit/y","https://user@flow.google.com/project/x/edit/y"])expect(()=>parseExistingBrowserObservation({...valid(),url})).toThrow();});
+  it("does not permit prompt or personally identifying account data to cross the boundary", () => {
+    const prompt = { ...valid(), prompt: "private project prompt" };
+    expect(() => parseExistingBrowserObservation(prompt)).toThrow(/prompt/i);
+    const email = { ...valid(), visibleAccountContext: "someone@example.com" };
+    expect(() => parseExistingBrowserObservation(email)).toThrow(/email/i);
+  });
+  it("fails closed if the CUA-only tab binding disconnects or changes", async () => {
+    const binding = { browserId: "browser-fixture", tabId: fixtureTab, url: valid().url };
+    const disconnected = new InjectedExistingTabDriver(binding, async () => { throw new Error("tab disconnected"); });
+    await expect(disconnected.observe()).rejects.toMatchObject({ code: "PROVIDER_UNAVAILABLE", details: { reason: "EXISTING_SESSION_REQUIRED" } });
+    const replaced = new InjectedExistingTabDriver(binding, async () => ({ ...valid(), tabId: "different" }));
+    await expect(replaced.observe()).rejects.toMatchObject({ code: "PROVIDER_UNAVAILABLE", details: { reason: "EXISTING_SESSION_REQUIRED" } });
+  });
+  it("accepts a credits-only observation without fabricating configuration or a cost", () => {
+    const unknown = { ...valid(), configuration: null, totalCredits: null, availableCredits: 1035, visibleAccountContext: "Pro" };
+    const observation = parseExistingBrowserObservation(unknown);
+    expect(observation).toMatchObject({ configuration: null, totalCredits: null, availableCredits: 1035 });
+    expect(() => observationSnapshot(observation)).toThrow(/complete current configuration/i);
+  });
+  it("preserves unknown price and balance rather than guessing", () => {
+    const unknown = { ...valid(), totalCredits: null, availableCredits: null, visibleAccountContext: null };
+    expect(parseExistingBrowserObservation(unknown)).toMatchObject({ totalCredits: null, availableCredits: null, visibleAccountContext: null });
+  });
+  it("returns a typed invalid-request error for malformed UI evidence", () => {
+    const invalid = valid(); invalid.configuration.outputs = 0;
+    try { parseExistingBrowserObservation(invalid); throw new Error("expected parser error"); }
+    catch (error) { expect(error).toMatchObject({ code: "INVALID_REQUEST" } satisfies Partial<FlowBridgeError>); }
+  });
+});

@@ -1,0 +1,17 @@
+import { describe, expect, it } from "vitest";
+import { assertDedicatedProfile } from "../../packages/flow-adapter/src/profile.js";
+import { parseVisibleCredits } from "../../packages/flow-adapter/src/semantic-flow-page.js";
+
+describe("Flow profile safety", () => {
+  it("rejects the regular Chrome User Data directory", () => {
+    expect(() => assertDedicatedProfile(`${process.env.HOME}/Library/Application Support/Google/Chrome`)).toThrow(/Refusing/);
+  });
+  it("accepts an explicit separate profile", () => {
+    expect(assertDedicatedProfile("/tmp/flowbridge-test-profile")).toBe("/tmp/flowbridge-test-profile");
+  });
+});
+
+describe("visible cost parsing", () => {
+  it("accepts an explicit labelled whole-job cost", () => expect(parseVisibleCredits("Total cost: 12 AI Credits")).toBe(12));
+  it("rejects a bare account balance", () => expect(parseVisibleCredits("812 credits remaining")).toBeNull());
+});

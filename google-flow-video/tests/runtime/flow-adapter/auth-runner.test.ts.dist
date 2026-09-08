@@ -1,0 +1,34 @@
+import { describe, expect, it } from "vitest";
+import { FlowAuthRunner } from "../../packages/flow-adapter/src/auth-runner.js";
+import { FlowBrowserSession } from "../../packages/flow-adapter/src/browser-session.js";
+
+describe("auth runner lifecycle", () => {
+  it("refuses dedicated browser startup without explicit compatibility authorization", async () => {
+    await expect(FlowAuthRunner.open({ targetUrl: "data:text/html,<main>must not open</main>" })).rejects.toMatchObject({
+      code: "PROVIDER_UNAVAILABLE",
+      details: { reason: "DEDICATED_BROWSER_NOT_AUTHORIZED" },
+    });
+  });
+
+  it.each([undefined, {}, Object.freeze({})])("rejects a forged runtime authorization token before browser startup", async forged => {
+    await expect(FlowBrowserSession.openDedicatedCompatibility(forged as never, `/tmp/flowbridge-must-not-launch-${process.pid}`, "data:text/html,<main>forged</main>")).rejects.toMatchObject({
+      code: "PROVIDER_UNAVAILABLE",
+      details: { reason: "DEDICATED_BROWSER_NOT_AUTHORIZED" },
+    });
+  });
+
+  it("keeps the owner alive through an auth-required poll, releases it, and permits a clean restart", async () => {
+    // This test uses a throwaway local browser profile and a data URL, not Flow.
+    const profile = `/tmp/flowbridge-auth-runner-${process.pid}-${Date.now()}`;
+    const updates: string[] = [];
+    const runner = await FlowAuthRunner.open({ dedicatedCompatibilityAuthorized: true, profileDir: profile, targetUrl: "data:text/html,<main>local fixture</main>", pollMs: 25, onUpdate: u => { updates.push(u.status); } });
+    await new Promise(resolve => setTimeout(resolve, 80));
+    expect(runner.status?.status).toBe("authenticated");
+    expect(updates).toContain("authenticated");
+    await runner.close();
+    // A second context on the same throwaway directory proves the lock was released.
+    const restarted = await FlowAuthRunner.open({ dedicatedCompatibilityAuthorized: true, profileDir: profile, targetUrl: "data:text/html,<main>local fixture restart</main>", pollMs: 25 });
+    expect(restarted.status?.status).toBe("authenticated");
+    await restarted.close();
+  }, 15_000);
+});
