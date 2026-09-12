@@ -1,0 +1,19 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>FlowBridge Production</title>
+  <link rel="stylesheet" href="/dashboard/app.css">
+</head>
+<body>
+  <header><div><p class="eyebrow">LOCAL PRODUCTION WORKSPACE</p><h1>FlowBridge 操作面板</h1><p>查看镜头进度、预算与验收状态。生成和重试请通过任务命令执行。</p></div><span class="local">127.0.0.1</span></header>
+  <main>
+    <form id="connect"><label>本地访问令牌<input id="token" type="password" autocomplete="off" required></label><label>项目 ID<input id="project" autocomplete="off" required></label><button>载入</button></form>
+    <section id="message" class="message">输入 flowd 的本地令牌和项目 ID。</section>
+    <section id="summary" class="summary" hidden></section>
+    <section id="scenes" hidden><div class="section-title"><h2>镜头</h2><span id="updated"></span></div><div id="scene-list" class="scene-list"></div></section>
+  </main>
+  <script src="/dashboard/app.js" defer></script>
+</body>
+</html>

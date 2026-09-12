@@ -2,12 +2,12 @@
 name: google-flow-video
 description: Prepare, run, recover, and quality-check Google Flow video jobs with a local auditable bridge. Use for user-requested Flow generation; requires an existing authenticated Flow tab for live work.
 metadata:
-  version: 0.3.8
+  version: 0.4.0
 ---
 
 # Google Flow Video
 
-Version 0.3.8 removes private historical identifiers from the portable runtime and formalizes the current-task authorization contract for the controlled user-resume retry path.
+Version 0.4.0 adds the immutable production workspace: versioned references, scene dependencies, edit branches, and a local panel/CLI view over the existing job engine.
 
 Use this skill for a Google Flow video request that needs a durable local job record, a whole-run Credit ceiling, and safe recovery. The bundled runtime is a local TypeScript workspace; it does not contain credentials, browser profiles, media, or a connection to the user's browser.
 
@@ -16,13 +16,16 @@ Use this skill for a Google Flow video request that needs a durable local job re
 1. Copy `templates/request.background_music_only.json` into the user's chosen project directory. Preserve the original creative master and any user override separately, with hashes.
 2. For a new Chinese-localized video, keep Flow in `background_music_only`: picture and background music are allowed; spoken words, narration, lyrics, recognizable vocal sounds, and generated dialogue are prohibited. See [audio policy](references/audio-policy.md).
 3. Before a live Flow action, use the user's existing, already authenticated Flow tab only through the supported Codex browser connection. One executor owns the browser work for a run; it claims the matching existing project tab from a fresh inventory and records its observed identity. Browser IDs are executor-local, so an agent handoff must rediscover and match the provider tab identity plus canonical project URL instead of requiring the numeric browser ID to match. It never creates or closes a Flow tab, window, profile, or session. On a stale handle, inventory once and match the existing project tab again; if it is absent, stop with `EXISTING_SESSION_REQUIRED` and preserve the UI. Read [executor session lifecycle](references/executor-session-lifecycle.md) before live browser work.
-4. Use the bundled runtime only after a user asks to generate. First copy it to a new user-owned run workspace with `scripts/bootstrap_runtime.sh --workspace <new-directory>`; never run dependency installation, Flow commands, or production commands inside the Skill source or installed Skill directory. Follow [runtime operations](references/runtime-operations.md). The fixed whole-parent-run cap is 50 Flow Credits. Unknown or over-cap cost stops before a provider effect. Do not alter that cap without the current user's authorization.
+4. Use the bundled runtime only after a user asks to generate. First copy it to a new user-owned run workspace with `scripts/bootstrap_runtime.sh --workspace <new-directory>`; never run dependency installation, Flow commands, or production commands inside the Skill source or installed Skill directory. Follow [runtime operations](references/runtime-operations.md). New parent ledgers have a fixed 200-Credit cap. Existing 50-Credit ledgers remain immutable recovery records and are not upgraded. Unknown or over-cap cost stops before a provider effect.
+5. New jobs request Omni by default; Veo requires explicit user selection. Neither route falls back to another model. A requested model is not proof of the visible Flow UI selection or result readback. A bare Omni label is not proof of Omni Flash 1.1.
 
 ## Submission and recovery
 
 Use one immutable `idempotency_key` per job and one `budget_group` ledger for a multi-step job. Persist the source files and hashes before the one permitted Generate click. If a submission intent already exists, do not create a new request or click Generate again: observe, reconcile, resume, or download the original job only. A confirmed provider failure with explicit no-charge evidence, no output, and matching browser/tab/account/project/request lineage can use the guarded retry route; `budget confirm-no-charge` records `NOT_CHARGED` only when its evidence is sufficient.
 
 Timeout, crash, uncertain submission, and ambiguous results are recovery-only by default. `user-resume-prepare` is a narrow exception for an explicit current-user authorization to pay again, accompanied by the required unresolved-job proof and a current authorization record. That record is structured, hash-bound to the immutable job/request, parent budget and controlled second attempt, recorded during the current task, and expires promptly. It also records the current execution context and an authorization-evidence hash; it never relies on a historical conversation, fixed user wording, or an embedded account/session identifier. Authorization records from earlier contract versions are incompatible and cannot be reused. The authorization itself does not replace unresolved/output-free and no-charge proof. Never infer that authorization from a normal “continue”, an attachment, or old task language. On handoff or agent completion, release browser control only; do not close the user's tab or open a replacement. Browser receipts are assertions from the connected trusted Codex executor; they are useful audit evidence, not a security boundary against a malicious executor.
+
+The workspace can version a reference, plan a dependency graph, and derive an edit branch with a frozen `source_video` input. Those are local records and ticket inputs. They do not prove that Flow's Edit video control or upload slot is available. Browser execution requires the same supported existing-tab ticket and fresh visible readback as generation.
 
 ## Voice and delivery
 

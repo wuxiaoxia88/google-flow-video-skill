@@ -25,6 +25,7 @@ export interface Locator {
   nth?(index: number): Locator;
   allTextContents?(): Promise<string[]>;
   textContent?(): Promise<string | null>;
+  locator?(selector:string): Locator;
 }
 interface PersistentContext { pages(): BrowserPage[]; newPage(): Promise<BrowserPage>; close(): Promise<void> }
 interface Chromium { launchPersistentContext(path: string, options: Record<string, unknown>): Promise<PersistentContext> }

@@ -3,18 +3,26 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { Storage } from "../../packages/storage/src/index.js";
+import Database from "better-sqlite3";
 
 describe("shared two-step budget ledger", () => {
-  it("atomically reserves at most 50 credits, deduplicates steps, and never releases pending spend", async () => {
+  it("atomically reserves at most 200 credits, deduplicates steps, and never releases pending spend", async () => {
     const dir = await mkdtemp(join(tmpdir(), "flowbridge-budget-"));
     const storage = new Storage(join(dir, "db.sqlite"));
     expect(storage.reserveBudgetStep("run-1", "step-a", 30).quotedCredits).toBe(30);
-    expect(storage.reserveBudgetStep("run-1", "step-b", 20).quotedCredits).toBe(20);
+    expect(storage.reserveBudgetStep("run-1", "step-b", 170).quotedCredits).toBe(170);
     expect(storage.reserveBudgetStep("run-1", "step-a", 30).state).toBe("RESERVED");
     expect(() => storage.reserveBudgetStep("run-1", "step-c", 1)).toThrow("BUDGET_EXCEEDED");
     expect(storage.consumeBudgetStep("run-1", "step-a").state).toBe("CONSUMED");
     expect(() => storage.reserveBudgetStep("run-1", "step-c", 1)).toThrow("BUDGET_EXCEEDED");
-    expect(storage.getBudgetLedger("run-1")).toMatchObject({ capCredits: 50, reservedCredits: 50, consumedCredits: 30 });
+    expect(storage.getBudgetLedger("run-1")).toMatchObject({ capCredits: 200, reservedCredits: 200, consumedCredits: 30 });
     storage.close();
   });
+});
+
+it("migrates a legacy 50-credit ledger without raising its cap or changing steps",async()=>{
+  const dir=await mkdtemp(join(tmpdir(),"flowbridge-legacy-budget-")),path=join(dir,"db.sqlite"),db=new Database(path),now=new Date().toISOString();
+  db.exec(`CREATE TABLE budget_ledgers(parent_id TEXT PRIMARY KEY,cap_credits INTEGER NOT NULL CHECK(cap_credits=50),reserved_credits INTEGER NOT NULL DEFAULT 0,consumed_credits INTEGER NOT NULL DEFAULT 0,created_at TEXT NOT NULL);CREATE TABLE budget_steps(parent_id TEXT NOT NULL,step_key TEXT NOT NULL,quoted_credits INTEGER NOT NULL CHECK(quoted_credits>=0),state TEXT NOT NULL CHECK(state IN ('RESERVED','CONSUMED','NOT_CHARGED')),created_at TEXT NOT NULL,job_id TEXT,request_hash TEXT,PRIMARY KEY(parent_id,step_key),FOREIGN KEY(parent_id) REFERENCES budget_ledgers(parent_id));`);
+  db.prepare("INSERT INTO budget_ledgers VALUES(?,?,?,?,?)").run("legacy",50,50,30,now);for(const [key,credits,state] of [["used",30,"CONSUMED"],["held",15,"RESERVED"],["released",5,"NOT_CHARGED"]] as const)db.prepare("INSERT INTO budget_steps VALUES(?,?,?,?,?,?,?)").run("legacy",key,credits,state,now,null,null);db.close();
+  const storage=new Storage(path);expect(storage.getBudgetLedger("legacy")).toMatchObject({capCredits:50,reservedCredits:50,consumedCredits:30});expect(storage.getBudgetSteps("legacy").map(x=>x.state).sort()).toEqual(["CONSUMED","NOT_CHARGED","RESERVED"]);expect(storage.db.prepare("PRAGMA foreign_key_check").all()).toEqual([]);expect(()=>storage.reserveBudgetStep("legacy","overflow",1)).toThrow("BUDGET_EXCEEDED");expect(storage.createBudgetLedger("new").capCredits).toBe(200);storage.close();
 });

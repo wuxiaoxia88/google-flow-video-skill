@@ -1,4 +1,5 @@
 import { FlowBridgeError, type ExistingBrowserObservation, type GenerationMode, type RuntimeSubmissionSnapshot } from "../../contracts/src/index.js";
+import { providerFamilyFromVisibleModel } from "../../policy-engine/src/index.js";
 
 /**
  * Boundary for a tab observed through Codex CUA.  It is intentionally data-only:
@@ -55,7 +56,8 @@ export function parseExistingBrowserObservation(value: unknown): ExistingBrowser
   const visibleAccountContext = nullableAccountContext(value.visibleAccountContext);
   const visibleAssetRefs = optionalRefs(value.visibleAssetRefs, "visibleAssetRefs");
   const selectedSourceAssetRef = value.selectedSourceAssetRef === null || value.selectedSourceAssetRef === undefined ? null : text(value.selectedSourceAssetRef,"selectedSourceAssetRef");
-  return assertFreshExistingBrowserObservation({ browserId, tabId, url, observedAt, configuration, availableCredits, totalCredits, visibleAccountContext, projectRef, visibleAssetRefs, selectedSourceAssetRef });
+  const capabilityCapture=value.capabilityCapture===undefined||value.capabilityCapture===null?null:parseCapabilityCapture(record(value.capabilityCapture,"capabilityCapture"));
+  return assertFreshExistingBrowserObservation({ browserId, tabId, url, observedAt, configuration, capabilityCapture, availableCredits, totalCredits, visibleAccountContext, projectRef, visibleAssetRefs, selectedSourceAssetRef });
 }
 
 /** Reject stale UI facts at every import boundary, including REST and direct core callers. */
@@ -77,6 +79,9 @@ export function observationSnapshot(observation: ExistingBrowserObservation): Ru
     visibleAccountContext: observation.visibleAccountContext,
     projectRef: observation.projectRef,
     model: observation.configuration.model,
+    modelOption:observation.configuration.modelOption??null,
+    observedProviderFamily:observation.configuration.modelOption?providerFamilyFromVisibleModel(observation.configuration.modelOption.label,observation.configuration.modelOption.value):"unknown",
+    capabilityCapture:observation.capabilityCapture?{hash:observation.capabilityCapture.hash,capturedAt:observation.capabilityCapture.capturedAt,locale:observation.capabilityCapture.locale,source:"executor_observation"}:null,
     mode: observation.configuration.mode,
     aspectRatio: observation.configuration.aspectRatio,
     durationSeconds: observation.configuration.durationSeconds,
@@ -91,7 +96,9 @@ export function observationSnapshot(observation: ExistingBrowserObservation): Ru
   };
 }
 
-function parseConfiguration(configuration:Record<string,unknown>){return {model:text(configuration.model,"configuration.model"),mode:generationMode(configuration.mode),aspectRatio:text(configuration.aspectRatio,"configuration.aspectRatio"),durationSeconds:whole(configuration.durationSeconds,"configuration.durationSeconds",1),resolution:text(configuration.resolution,"configuration.resolution"),outputs:whole(configuration.outputs,"configuration.outputs",1)};}
+function parseConfiguration(configuration:Record<string,unknown>){return {model:text(configuration.model,"configuration.model"),modelOption:configuration.modelOption===undefined||configuration.modelOption===null?null:parseOption(record(configuration.modelOption,"configuration.modelOption")),mode:generationMode(configuration.mode),aspectRatio:text(configuration.aspectRatio,"configuration.aspectRatio"),durationSeconds:whole(configuration.durationSeconds,"configuration.durationSeconds",1),resolution:text(configuration.resolution,"configuration.resolution"),outputs:whole(configuration.outputs,"configuration.outputs",1)};}
+function parseOption(value:Record<string,unknown>){return{label:text(value.label,"model option label"),value:text(value.value,"model option value")};}
+function parseCapabilityCapture(value:Record<string,unknown>){const hash=text(value.hash,"capabilityCapture.hash");if(!/^sha256:[a-f0-9]{64}$/.test(hash))fail("capabilityCapture.hash must be sha256:<64 lowercase hex>.");const capturedAt=iso(value.capturedAt,"capabilityCapture.capturedAt");const locale=value.locale===null?null:text(value.locale,"capabilityCapture.locale");if(!Array.isArray(value.modelOptions)||!value.modelOptions.length)fail("capabilityCapture.modelOptions must be a non-empty array.");const modelOptions=value.modelOptions.map((x,i)=>parseOption(record(x,`capabilityCapture.modelOptions[${i}]`)));return{hash,capturedAt,locale,modelOptions};}
 
 function isRecord(value: unknown): value is Record<string, unknown> { return typeof value === "object" && value !== null && !Array.isArray(value); }
 function record(value: unknown, name: string): Record<string, unknown> { if (!isRecord(value)) fail(`${name} must be an object.`); return value; }
@@ -99,7 +106,7 @@ function text(value: unknown, name: string): string { if (typeof value !== "stri
 function iso(value: unknown, name: string): string { const out = text(value, name); if (Number.isNaN(Date.parse(out))) fail(`${name} must be an ISO timestamp.`); return out; }
 function whole(value: unknown, name: string, min: number): number { if (typeof value !== "number" || !Number.isInteger(value) || value < min) fail(`${name} must be an integer >= ${min}.`); return value; }
 function nullableCredits(value: unknown, name: string): number | null { if (value === null) return null; if (typeof value !== "number" || !Number.isFinite(value) || value < 0) fail(`${name} must be a non-negative finite number or null.`); return value; }
-function generationMode(value: unknown): GenerationMode { const out = text(value, "configuration.mode"); if (out === "text_to_video" || out === "extend_video" || out === "first_frame_to_video" || out === "first_last_frames_to_video" || out === "ingredients_to_video") return out; fail("configuration.mode is not a supported Flow generation mode."); }
+function generationMode(value: unknown): GenerationMode { const out = text(value, "configuration.mode"); if (out === "text_to_video" || out === "extend_video" || out === "first_frame_to_video" || out === "first_last_frames_to_video" || out === "ingredients_to_video" || out==="edit_video") return out; fail("configuration.mode is not a supported Flow generation mode."); }
 function optionalRefs(value:unknown,name:string):string[]|undefined {if(value===undefined)return undefined;if(!Array.isArray(value))fail(`${name} must be an array.`);const refs=value.map((v,i)=>text(v,`${name}[${i}]`));if(new Set(refs).size!==refs.length)fail(`${name} must not contain duplicates.`);return refs;}
 function flowProjectUrl(value: string): string {const parsed=flowPageUrl(value);if(parsed.url!==parsed.projectRef)fail("projectRef must be one canonical https://flow.google.com/project/<id> URL.");return parsed.projectRef;}
 function flowPageUrl(value:string):{url:string;projectRef:string}{let url:URL;try{url=new URL(value);}catch{fail("Observation must contain a valid Flow project URL.");}if(url.origin!=="https://flow.google.com"||url.username||url.password||url.search||url.hash)fail("Observation must bind to the official canonical Flow origin without credentials, query, or hash.");const match=url.pathname.match(/^\/project\/([A-Za-z0-9_-]+)(?:\/edit\/([A-Za-z0-9_-]+))?\/?$/);if(!match)fail("Observation URL must be /project/<id> or /project/<id>/edit/<scene-id>.");const projectRef=`https://flow.google.com/project/${match[1]}`;const normalized=match[2]?`${projectRef}/edit/${match[2]}`:projectRef;return {url:normalized,projectRef};}

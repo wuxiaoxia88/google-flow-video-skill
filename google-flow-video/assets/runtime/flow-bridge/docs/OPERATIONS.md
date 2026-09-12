@@ -12,26 +12,21 @@ The suite includes unit/fixture checks plus black-box CLI, REST, SQLite/process-
 ## CLI
 
 ```bash
-LEDGER_ID="replace-with-ledger-id"
-JOB_ID="replace-with-job-id"
-TICKET_ID="replace-with-ticket-id"
 pnpm --silent flowctl doctor
 pnpm --silent flowctl credits
 pnpm --silent flowctl capabilities
-pnpm --silent flowctl budget create --id "$LEDGER_ID"
-pnpm --silent flowctl budget status --id "$LEDGER_ID"
+pnpm --silent flowctl budget create --id <ledger_id>
+pnpm --silent flowctl budget status --id <ledger_id>
 pnpm --silent flowctl generate --file /absolute/path/request.json --no-run
 pnpm --silent flowctl browser observe --file /absolute/path/sanitized-observation.json
-pnpm --silent flowctl browser prepare --job "$JOB_ID" --observation /absolute/path/fresh-observation.json
-pnpm --silent flowctl browser claim --ticket "$TICKET_ID" --observation /absolute/path/final-observation.json
-pnpm --silent flowctl browser receipt --ticket "$TICKET_ID" --outcome clicked
-RECONCILE_TICKET_ID="replace-with-claimed-reconcile-ticket-id"
-FAILED_JOB_ID="replace-with-failed-job-id"
-pnpm --silent flowctl browser fail --ticket "$RECONCILE_TICKET_ID" --evidence /absolute/path/failure-evidence.json
-pnpm --silent flowctl browser retry-prepare --job "$FAILED_JOB_ID" --observation /absolute/path/fresh-observation.json
-pnpm --silent flowctl status "$JOB_ID"
-pnpm --silent flowctl resume "$JOB_ID"
-pnpm --silent flowctl cancel "$JOB_ID"
+pnpm --silent flowctl browser prepare --job <job_id> --observation /absolute/path/fresh-observation.json
+pnpm --silent flowctl browser claim --ticket <ticket_id> --observation /absolute/path/final-observation.json
+pnpm --silent flowctl browser receipt --ticket <ticket_id> --outcome clicked
+pnpm --silent flowctl browser fail --ticket <claimed_reconcile_ticket_id> --evidence /absolute/path/failure-evidence.json
+pnpm --silent flowctl browser retry-prepare --job <failed_job_id> --observation /absolute/path/fresh-observation.json
+pnpm --silent flowctl status <job_id>
+pnpm --silent flowctl resume <job_id>
+pnpm --silent flowctl cancel <job_id>
 ```
 
 Credits reads one uniquely visible account balance and capabilities returns only the currently visible model/mode/ratio/duration/resolution/output combination, each with source and capture time. Missing or ambiguous controls return `unknown` with a nonzero exit; no static values or inferred capability matrix are substituted. Preserve the original database, job id, request and key for recovery; never create a new submission after `SUBMISSION_UNCERTAIN`.

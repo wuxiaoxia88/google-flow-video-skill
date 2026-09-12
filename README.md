@@ -9,7 +9,7 @@
 ## 能做什么
 
 - 为一次 Flow 任务建立持久化作业、预算与幂等记录。
-- 对整个 Flow 父任务执行固定的 **50 Credits 上限**；价格未知或高于上限时停止，不点击 Generate。
+- 对新 Flow 父任务执行固定的 **200 Credits 上限**；旧 50 Credits 账本只用于恢复，价格未知或高于上限时停止，不点击 Generate。
 - 复用用户当前已经登录的 Flow 项目标签页，完成当前配置和费用复核、一次受控点击、结果核对与下载。
 - 在超时、崩溃或提交状态不明时保留原作业并进入恢复流程，避免盲目重复扣费。
 - 从不可变创意母稿派生逐镜请求；每个镜头保留完整原始提示词和该镜头的视觉/动作范围。
@@ -72,7 +72,7 @@ bash google-flow-video/scripts/execute_fixture.sh
 
 ## 版本与许可证
 
-当前 Skill 发布版本为 **0.3.8**。它清理了可移植 runtime 中不应随包发布的历史标识，并将受控补充重试改为当前任务、不可变请求和预算共同绑定的结构化授权契约。权威元数据仍以 `google-flow-video/SKILL.md` 为准。runtime 依赖由 `pnpm-lock.yaml` 锁定；不要仅为发布文档升级 runtime 或依赖。
+当前 Skill 发布版本为 **0.4.0**。新任务默认请求 Omni；Veo 仅由用户显式选择，且不会回退。它只通过当前 Codex 已连接的登录 Flow 页工作，不使用 Google API、私有 RPC 或令牌，也不会创建替代标签页。版本化素材、镜头依赖和 `edit_video` 输入契约属于本地工作区；实际 Flow 编辑界面仍需当前页面的可见读回与用户会话验收。权威元数据仍以 `google-flow-video/SKILL.md` 为准。runtime 依赖由 `pnpm-lock.yaml` 锁定；不要仅为发布文档升级 runtime 或依赖。
 
 发布前会运行 package 内容检查，确保 Flow 测试只使用合成标识、包内邮箱只使用 `example.com` fixture，并拒绝私有绝对路径与运行产物。公开历史准备就绪后，还应在仓库工作树运行 `python3 google-flow-video/scripts/release_privacy_check.py --git-worktree .`，确认全部可达提交的 author 与 committer 都是 GitHub noreply 地址。
 

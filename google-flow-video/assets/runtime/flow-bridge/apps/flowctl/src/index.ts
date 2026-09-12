@@ -1,11 +1,12 @@
 #!/usr/bin/env node
-import { mkdir, readFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
-import { FlowBridgeError, normalizeExternalRequest, type ExistingBrowserObservation, type FlowProvider } from "../../../packages/contracts/src/index.js";
+import { FlowBridgeError, createModelPolicy, normalizeExternalRequest, type ExistingBrowserObservation, type FlowProvider } from "../../../packages/contracts/src/index.js";
 import { JobEngine, MockProvider } from "../../../packages/job-engine/src/index.js";
 import { Storage } from "../../../packages/storage/src/index.js";
 import { FlowBrowserSession, FlowUiProvider, authorizeDedicatedCompatibility, ownFlowPage, parseExistingBrowserObservation } from "../../../packages/flow-adapter/src/index.js";
 import { chromium } from "playwright";
+import { ProductionWorkspace, type ModelPolicy as WorkspaceModelPolicy } from "../../../packages/production-workspace/src/index.js";
 
 const args=process.argv.slice(2), command=args[0];
 const flag=(name:string)=>{const i=args.indexOf(name);return i>=0?args[i+1]:undefined};
@@ -18,6 +19,7 @@ const flowUiProvider=new FlowUiProvider(fixtureProfile?{acquirePage:async()=>{co
 const providers=new Map<string,FlowProvider>([["flow_ui",flowUiProvider]]);
 if(args.includes("--enable-mock")) providers.set("mock",new MockProvider(flag("--mock-cost") ? Number(flag("--mock-cost")) : 4,{availableCredits:flag("--mock-balance")?Number(flag("--mock-balance")):undefined,submitReadbackCredits:flag("--mock-submit-cost")?Number(flag("--mock-submit-cost")):undefined,submitReadbackAvailableCredits:flag("--mock-submit-balance")?Number(flag("--mock-submit-balance")):undefined,effectLog:flag("--mock-effect-log"),crashPoint:flag("--mock-crash") as any,sourceMedia:flag("--mock-source-media")}));
 const engine=new JobEngine(storage,providers);
+const workspace=new ProductionWorkspace(storage);
 const print=(value:unknown)=>process.stdout.write(`${JSON.stringify(value)}\n`);
 const printJob=(job:{state:string})=>{print(job);if(job.state==="SUBMISSION_UNCERTAIN")process.exitCode=8;else if(job.state==="RESULT_AMBIGUOUS")process.exitCode=13;};
 try {
@@ -61,6 +63,29 @@ try {
     const id=flag("--id"); if(!id) throw new FlowBridgeError("INVALID_REQUEST","budget status requires --id <ledger_id>"); const ledger=storage.getBudgetLedger(id); if(!ledger) throw new FlowBridgeError("INVALID_REQUEST","Budget ledger not found"); print({...ledger,steps:storage.getBudgetSteps(id)});
   } else if(command==="budget"&&args[1]==="confirm-no-charge") {
     const jobId=flag("--job"),attemptId=flag("--attempt");if(!jobId||!attemptId)throw new FlowBridgeError("INVALID_REQUEST","budget confirm-no-charge requires --job <id> --attempt <failed-attempt-id>");print(await engine.confirmNoCharge(jobId,attemptId));
+  } else if(command==="workspace"&&args[1]==="project"&&args[2]==="list") {
+    print(workspace.listProjects());
+  } else if(command==="workspace"&&args[1]==="project"&&args[2]==="add") {
+    const name=requiredFlag("--name");print(workspace.createProject({id:flag("--id"),name}));
+  } else if(command==="workspace"&&args[1]==="entity"&&args[2]==="add") {
+    print(workspace.createEntity({id:flag("--id"),projectId:requiredFlag("--project"),displayName:requiredFlag("--name"),kind:flag("--kind")}));
+  } else if(command==="workspace"&&args[1]==="entity"&&args[2]==="revise") {
+    const locator=flag("--locator"),source={kind:requiredFlag("--source-kind") as "local"|"provider"|"generated",...(locator?{locator}:{}),...(flag("--provider-media-id")?{providerMediaId:flag("--provider-media-id")}:{})};
+    print(workspace.addReferenceVersion({entityId:requiredFlag("--entity"),sha256:requiredFlag("--sha256"),role:requiredFlag("--role") as "identity"|"start_frame"|"end_frame",source}));
+  } else if(command==="workspace"&&args[1]==="scene"&&args[2]==="plan") {
+    print(workspace.createScenePlan({projectId:requiredFlag("--project"),sceneId:flag("--id"),ordinal:positiveIntegerFlag("--ordinal"),prompt:requiredFlag("--prompt"),modelPolicy:await workspaceModelPolicy(),referenceVersionIds:csvFlag("--references")}));
+  } else if(command==="workspace"&&args[1]==="scene"&&args[2]==="revise") {
+    const input:{sceneId:string;prompt?:string;modelPolicy?:WorkspaceModelPolicy;referenceVersionIds?:string[]}={sceneId:requiredFlag("--scene")};if(flag("--prompt")!==undefined)input.prompt=flag("--prompt");if(flag("--model")!==undefined||flag("--capability-observation")!==undefined)input.modelPolicy=await workspaceModelPolicy();if(flag("--references")!==undefined)input.referenceVersionIds=csvFlag("--references");print(workspace.reviseScene(input));
+  } else if(command==="workspace"&&args[1]==="scene"&&args[2]==="depend") {
+    print(workspace.addDependency({sceneId:requiredFlag("--scene"),dependsOnSceneId:requiredFlag("--on")}));
+  } else if(command==="workspace"&&args[1]==="scene"&&args[2]==="status") {
+    print(workspace.sceneStatus(requiredFlag("--scene")));
+  } else if(command==="workspace"&&args[1]==="scene"&&args[2]==="list") {
+    print(workspace.listScenes(requiredFlag("--project")));
+  } else if(command==="workspace"&&args[1]==="scene"&&args[2]==="export-request") {
+    const sceneId=requiredFlag("--scene"),status=workspace.sceneStatus(sceneId);if(status.state!=="RUNNABLE")throw new FlowBridgeError("UNSUPPORTED_COMBINATION","Scene cannot export an executable request until its blockers are resolved",{state:status.state,blockers:status.blockers});const mode=requiredFlag("--mode") as "text_to_video"|"extend_video"|"first_frame_to_video"|"first_last_frames_to_video"|"ingredients_to_video"|"edit_video",sourceVideo=flag("--source-video");const external=workspace.buildExternalRequest({sceneId,idempotencyKey:requiredFlag("--idempotency-key"),project:{name:requiredFlag("--project-name"),reuse:true},mode,...(sourceVideo?{sourceVideo:{path:resolve(sourceVideo)}}:{}),aspectRatio:requiredFlag("--aspect-ratio") as "16:9"|"9:16",durationSeconds:positiveIntegerFlag("--duration-seconds"),resolution:requiredFlag("--resolution"),outputs:positiveIntegerFlag("--outputs"),budgetLedgerId:requiredFlag("--budget-ledger"),budgetStepKey:requiredFlag("--budget-step")});const out=resolve(requiredFlag("--out"));await mkdir(dirname(out),{recursive:true});await writeFile(out,`${JSON.stringify(external,null,2)}\n`,{flag:"wx"});const job=await engine.create(normalizeExternalRequest(external)),candidate=workspace.bindExistingJob({sceneId,jobId:job.id,requestHash:job.requestHash,budgetLedgerId:external.budget_group.ledger_id,budgetStepKey:external.budget_group.step_key});print({requestFile:out,job,candidate,contractStatus:mode==="edit_video"?"TICKET_CONTRACT_PREPARED_BROWSER_UNVERIFIED":"IMMUTABLE_REQUEST_PREPARED",next:"Import a fresh existing-browser observation, then run browser prepare for this job. No provider effect has occurred."});
+  } else if(command==="workspace"&&args[1]==="dispatch-to-existing-job") {
+    const sceneId=requiredFlag("--scene"),jobId=requiredFlag("--job"),job=storage.getJob(jobId);if(!job)throw new FlowBridgeError("INVALID_REQUEST","Existing job not found");const request=JSON.parse(storage.getRequestJson(jobId));if(request.provider!=="flow_ui")throw new FlowBridgeError("INVALID_REQUEST","Workspace dispatch accepts an existing flow_ui job only");if(!request.budgetContext?.ledgerId||!request.budgetContext?.stepKey)throw new FlowBridgeError("INVALID_REQUEST","Existing job has no shared budget binding");const base=request.modelPolicy??createModelPolicy(request.model,"explicit"),observed=job.runtimeSnapshot?.observedProviderFamily,capabilityState=observed===base.requiredFamily?"supported":observed?"unsupported":"unknown";const policy:WorkspaceModelPolicy={...base,capabilityState,unsupportedReason:observed&&observed!==base.requiredFamily?`Observed ${observed}; required ${base.requiredFamily}`:undefined,evidenceDate:job.runtimeSnapshot?.capabilityCapture?.capturedAt??job.runtimeSnapshot?.capturedAt};print(workspace.bindExistingJob({sceneId,jobId,requestHash:job.requestHash,budgetLedgerId:request.budgetContext.ledgerId,budgetStepKey:request.budgetContext.stepKey,modelPolicy:policy}));
   } else if(command==="generate") {
     const file=flag("--file"); if(!file) throw new FlowBridgeError("INVALID_REQUEST","generate requires --file <request.json>");
     const external=JSON.parse(await readFile(resolve(file),"utf8"));
@@ -72,7 +97,7 @@ try {
   else if(command==="resume") {const resumed=await engine.run(args[1] ?? "");printJob(args.includes("--wait")?await engine.wait(resumed.id,{timeoutMs:flag("--timeout-ms")?Number(flag("--timeout-ms")):undefined}):resumed);}
   else if(command==="cancel") printJob(engine.cancel(args[1] ?? ""));
   else if(command==="download") printJob(await engine.download(args[1] ?? ""));
-  else throw new FlowBridgeError("INVALID_REQUEST","Usage: flowctl doctor | auth open|status | credits | capabilities | budget create|status --id <ledger_id> | generate --file request.json [--enable-mock] | status|resume|cancel|download <job>");
+  else throw new FlowBridgeError("INVALID_REQUEST","Usage: flowctl doctor | auth open|status | credits | capabilities | budget create|status --id <ledger_id> | workspace project|entity|scene|dispatch-to-existing-job ... | generate --file request.json [--enable-mock] | status|resume|cancel|download <job>");
 } catch(error) {
   const e=error instanceof FlowBridgeError?error:new FlowBridgeError("INVALID_REQUEST",error instanceof Error?error.message:String(error));
   print({error:{code:e.code,message:e.message,details:e.details}});
@@ -81,3 +106,7 @@ try {
 
 function validateObservation(value:unknown):ExistingBrowserObservation {const observation=parseExistingBrowserObservation(value);if(Date.now()-Date.parse(observation.observedAt)>60_000||Date.parse(observation.observedAt)-Date.now()>5_000)throw new FlowBridgeError("INVALID_REQUEST","Existing-browser observation is stale or has an invalid future timestamp");return observation;}
 function requireCurrentObservation(storage:Storage):ExistingBrowserObservation {const value=storage.getBrowserObservation();if(!value)throw new FlowBridgeError("AUTH_REQUIRED","No current existing-browser observation; use the Codex browser tool and import one",{reason:"EXISTING_SESSION_REQUIRED"});return validateObservation(value);}
+function requiredFlag(name:string):string {const value=flag(name);if(!value)throw new FlowBridgeError("INVALID_REQUEST",`${name} is required`);return value;}
+function positiveIntegerFlag(name:string):number {const value=Number(requiredFlag(name));if(!Number.isInteger(value)||value<1)throw new FlowBridgeError("INVALID_REQUEST",`${name} must be a positive integer`);return value;}
+function csvFlag(name:string):string[] {const value=flag(name);return value?value.split(",").map(x=>x.trim()).filter(Boolean):[];}
+async function workspaceModelPolicy():Promise<WorkspaceModelPolicy> {const explicit=flag("--model"),base=createModelPolicy(explicit,explicit?"explicit":"default"),file=flag("--capability-observation");if(!file)return {...base,capabilityState:"unknown"};const observation=validateObservation(JSON.parse(await readFile(resolve(file),"utf8")));if(!observation.configuration)throw new FlowBridgeError("UNSUPPORTED_COMBINATION","Capability observation has no complete visible configuration");const observed=createModelPolicy(observation.configuration.model,"explicit"),supported=observed.requiredFamily===base.requiredFamily;return {...base,capabilityState:supported?"supported":"unsupported",unsupportedReason:supported?undefined:`Observed ${observed.requiredFamily}; required ${base.requiredFamily}`,evidenceDate:observation.observedAt};}

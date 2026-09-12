@@ -3,9 +3,9 @@ import { access, mkdir, rename, stat, writeFile } from "node:fs/promises";
 import { constants, createReadStream } from "node:fs";
 import { basename, extname, join, resolve } from "node:path";
 import { spawn } from "node:child_process";
-import { FlowBridgeError, type ProviderAsset } from "../../contracts/src/index.js";
+import { FlowBridgeError, type ProviderAsset, type ProviderModelFamily } from "../../contracts/src/index.js";
 
-export interface DownloadProvenance { jobId: string; projectName: string; projectUrl: string; modelRequested: string; modelActual: string; aspectRatio: "16:9" | "9:16"; durationSeconds: number; resolution: string; promptSha256: string; targetMatchEvidence: Record<string, unknown>; inputAssets?: Array<{ ordinal: number; contentSha256: string }>; creditsBefore?: number | null; creditsAfter?: number | null; requireAudio?: boolean; }
+export interface DownloadProvenance { jobId: string; projectName: string; projectUrl: string; modelRequested: string; modelActual: string; modelActualReadback?:{family:ProviderModelFamily;label:string|null;value:string|null;source:"result_card"|"result_detail"|"unknown"}; aspectRatio: "16:9" | "9:16"; durationSeconds: number; resolution: string; promptSha256: string; targetMatchEvidence: Record<string, unknown>; inputAssets?: Array<{ ordinal: number; contentSha256: string }>; creditsBefore?: number | null; creditsAfter?: number | null; requireAudio?: boolean; }
 export interface ValidatedDownload { asset: ProviderAsset; sidecarPath: string; mediaProbe: Record<string, unknown>; fullDecode: Record<string, unknown>; }
 
 export class DownloadManager {
@@ -26,7 +26,7 @@ export class DownloadManager {
     await rename(part, target);
     const sidecarPath = `${target}.json`;
     const asset: ProviderAsset = { providerAssetRef: String(provenance.targetMatchEvidence.provider_card_ref ?? "verified-flow-asset"), status: "generated", localPath: target, sha256, metadata: { sizeBytes: (await stat(target)).size, mediaProbe, fullDecode: decodeResult, sidecarPath } };
-    const sidecar = { job_id: provenance.jobId, provider: "flow_ui", project_name: provenance.projectName, project_url: provenance.projectUrl, model_requested: provenance.modelRequested, model_actual: provenance.modelActual, duration_seconds: provenance.durationSeconds, aspect_ratio: provenance.aspectRatio, resolution: provenance.resolution, credits_before: provenance.creditsBefore ?? null, credits_after: provenance.creditsAfter ?? null, credits_used: null, credits_attribution_confidence: "unknown", prompt_sha256: provenance.promptSha256, input_assets: (provenance.inputAssets ?? []).map(asset => ({ ordinal: asset.ordinal, content_sha256: asset.contentSha256 })), asset_sha256: sha256, target_match_evidence: provenance.targetMatchEvidence, media_probe: mediaProbe, full_decode: decodeResult, billing_source: "flow_ai_credits", created_at: new Date().toISOString() };
+    const sidecar = { job_id: provenance.jobId, provider: "flow_ui", project_name: provenance.projectName, project_url: provenance.projectUrl, model_requested: provenance.modelRequested, model_actual: provenance.modelActual, model_actual_readback:provenance.modelActualReadback??{family:"unknown",label:null,value:null,source:"unknown"}, duration_seconds: provenance.durationSeconds, aspect_ratio: provenance.aspectRatio, resolution: provenance.resolution, credits_before: provenance.creditsBefore ?? null, credits_after: provenance.creditsAfter ?? null, credits_used: null, credits_attribution_confidence: "unknown", prompt_sha256: provenance.promptSha256, input_assets: (provenance.inputAssets ?? []).map(asset => ({ ordinal: asset.ordinal, content_sha256: asset.contentSha256 })), asset_sha256: sha256, target_match_evidence: provenance.targetMatchEvidence, media_probe: mediaProbe, full_decode: decodeResult, billing_source: "flow_ai_credits", created_at: new Date().toISOString() };
     await writeFile(sidecarPath, `${JSON.stringify(sidecar, null, 2)}\n`, { mode: 0o600 }); return { asset, sidecarPath, mediaProbe, fullDecode: decodeResult };
   }
 }

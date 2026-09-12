@@ -24,6 +24,10 @@ class ProductionError(Exception):
     pass
 
 
+FLOW_CREDIT_HARD_CAP = 200
+DEFAULT_FLOW_MODEL = "Gemini Omni Flash 1.1"
+
+
 def canonical(value: Any) -> bytes:
     return (json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n").encode()
 
@@ -103,7 +107,7 @@ def validate_manifest(path: Path) -> tuple[dict[str, Any], Path]:
             raise ProductionError(f"shot {i+1} changes duration without allow_retime=true")
         if not isinstance(shot.get("visual_scope"),str) or not shot["visual_scope"].strip(): raise ProductionError(f"shot {i+1} visual_scope is required")
         number(shot.get("provider_duration_seconds"),f"shot {i+1} provider duration",positive=True)
-        if not isinstance(shot.get("model"),str) or not shot["model"]: raise ProductionError(f"shot {i+1} model is required")
+        if "model" in shot and (not isinstance(shot["model"],str) or not shot["model"].strip()): raise ProductionError(f"shot {i+1} model must be a non-empty string")
         cursor = float(end)
     if abs(cursor-duration) > .001: raise ProductionError("shots must exactly cover timeline duration")
     tts = m.get("tts")
@@ -143,11 +147,15 @@ def cmd_derive(manifest_path: Path, out_dir: Path) -> dict[str, Any]:
     out_dir.mkdir(parents=True, exist_ok=True)
     prompt_path = out_dir / "flow-derived-prompt.txt"; prompt_path.write_text(prompt, encoding="utf-8")
     ledger_id=f"{m['run_id']}-flow-parent"
-    atomic_json(out_dir/"flow-ledger-plan.json",{"ledger_id":ledger_id,"cap_credits":50,"command":["pnpm","--silent","flowctl","budget","create","--id",ledger_id]})
+    atomic_json(out_dir/"flow-ledger-plan.json",{"ledger_id":ledger_id,"cap_credits":FLOW_CREDIT_HARD_CAP,"command":["pnpm","--silent","flowctl","budget","create","--id",ledger_id]})
     requests=[]
     for i, shot in enumerate(m["timeline"]["shots"]):
         scoped=prompt+f"\n[镜头执行范围]\n全片时间 {shot['start_seconds']:.3f}s–{shot['end_seconds']:.3f}s 映射为本次生成片段 0.000s–{shot['provider_duration_seconds']:.3f}s。仅执行以下视觉与动作范围：{shot['visual_scope']}\n不得在本镜头补写、提前或重复其他镜头动作。\n"
-        request={"backend":"flow_ui","idempotency_key":f"{m['run_id']}-shot-{i+1:02d}","project":{"name":m.get("project_name",m["run_id"]),"reuse":True},"mode":shot.get("mode","text_to_video"),"prompt":scoped,"prompt_mode":"verbatim","model":shot["model"],"aspect_ratio":m["delivery"]["aspect_ratio"],"duration_seconds":shot["provider_duration_seconds"],"resolution":m["delivery"]["resolution"],"outputs":1,"download":{"enabled":True,"directory":str((out_dir/"downloads").resolve()),"format":"mp4"},"cost_policy":{"max_credits":50,"confirm_above":50,"reject_when_unknown":True},"budget_group":{"ledger_id":ledger_id,"step_key":f"shot-{i+1:02d}"}}
+        requested_model=shot.get("model",DEFAULT_FLOW_MODEL)
+        selection_source="explicit" if "model" in shot else "default"
+        required_family="veo" if "veo" in requested_model.lower() else "gemini_omni_flash_1_1"
+        api_code=None
+        request={"backend":"flow_ui","idempotency_key":f"{m['run_id']}-shot-{i+1:02d}","project":{"name":m.get("project_name",m["run_id"]),"reuse":True},"mode":shot.get("mode","text_to_video"),"prompt":scoped,"prompt_mode":"verbatim","model":requested_model,"model_policy":{"version":1,"required_family":required_family,"api_code":api_code,"allow_fallback":False,"execution_backend":"flow_ui","selection_source":selection_source},"aspect_ratio":m["delivery"]["aspect_ratio"],"duration_seconds":shot["provider_duration_seconds"],"resolution":m["delivery"]["resolution"],"outputs":1,"download":{"enabled":True,"directory":str((out_dir/"downloads").resolve()),"format":"mp4"},"cost_policy":{"max_credits":FLOW_CREDIT_HARD_CAP,"confirm_above":FLOW_CREDIT_HARD_CAP,"reject_when_unknown":True},"budget_group":{"ledger_id":ledger_id,"step_key":f"shot-{i+1:02d}"}}
         request_path=out_dir/f"flow-request-shot-{i+1:02d}.json"; atomic_json(request_path,request)
         requests.append(request)
     with tempfile.TemporaryDirectory(prefix="flowbridge-derive-") as td:

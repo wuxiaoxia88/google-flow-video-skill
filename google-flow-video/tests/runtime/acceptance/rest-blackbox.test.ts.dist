@@ -44,7 +44,7 @@ async function startFlowd() {
 }
 
 function request(key: string) {
-  return { backend:"mock", idempotency_key:key, project:{name:"rest-fixture",reuse:false}, mode:"text_to_video", prompt:"fixture", prompt_mode:"verbatim", model:"fixture-model", aspect_ratio:"16:9", duration_seconds:4, resolution:"360p", outputs:1, download:{enabled:false,format:"mp4"}, cost_policy:{max_credits:50,confirm_above:50,reject_when_unknown:true} };
+  return { backend:"mock", idempotency_key:key, project:{name:"rest-fixture",reuse:false}, mode:"text_to_video", prompt:"fixture", prompt_mode:"verbatim", model:"omni-flash-1.1", aspect_ratio:"16:9", duration_seconds:4, resolution:"360p", outputs:1, download:{enabled:false,format:"mp4"}, cost_policy:{max_credits:200,confirm_above:200,reject_when_unknown:true} };
 }
 
 async function rawGet(port: number, headers: Record<string,string>) {

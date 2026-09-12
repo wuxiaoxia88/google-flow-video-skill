@@ -15,7 +15,7 @@ class ProductionCliTest(unittest.TestCase):
         for name,freq in (("music.wav","220"),("voice.wav","440")):
             subprocess.run(["ffmpeg","-v","error","-f","lavfi","-i",f"sine=frequency={freq}:duration=2","-ar","48000","-ac","2","-y",self.d/name],check=True)
         source={"path":"video.mp4","sha256":sha(self.d/"video.mp4")}
-        self.manifest={"schema_version":1,"run_id":"fixture","project_name":"Fixture","creative":{"original_prompt":{"path":"master.txt","sha256":sha(self.d/"master.txt")},"audio_override":{"path":"override.txt","sha256":sha(self.d/"override.txt")}},"timeline":{"duration_seconds":2,"shots":[{"start_seconds":0,"end_seconds":1,"source_duration_seconds":1,"source_start_seconds":0,"source":source,"visual_scope":"blue frame first beat","model":"fixture","provider_duration_seconds":1},{"start_seconds":1,"end_seconds":2,"source_duration_seconds":1,"source_start_seconds":1,"source":source,"visual_scope":"blue frame second beat","model":"fixture","provider_duration_seconds":1}]},"delivery":{"aspect_ratio":"16:9","resolution":"180p","fps":24},"tts":{"provider":"MMX","model":"speech","voice":"one-voice","single_take":True,"parameters":{},"output_path":"generated.wav"},"stems":{"video":{"path":"video.mp4","sha256":sha(self.d/"video.mp4")},"music":{"path":"music.wav","sha256":sha(self.d/"music.wav")},"voice":{"path":"voice.wav","sha256":sha(self.d/"voice.wav"),"line_timings":[{"text":"第一句","start_seconds":0.1,"end_seconds":0.8,"source_start_seconds":0,"source_end_seconds":0.5},{"text":"第二句","start_seconds":1.1,"end_seconds":1.8,"source_start_seconds":0.5,"source_end_seconds":1.0}]}}}
+        self.manifest={"schema_version":1,"run_id":"fixture","project_name":"Fixture","creative":{"original_prompt":{"path":"master.txt","sha256":sha(self.d/"master.txt")},"audio_override":{"path":"override.txt","sha256":sha(self.d/"override.txt")}},"timeline":{"duration_seconds":2,"shots":[{"start_seconds":0,"end_seconds":1,"source_duration_seconds":1,"source_start_seconds":0,"source":source,"visual_scope":"blue frame first beat","model":"Gemini Omni Flash 1.1","provider_duration_seconds":1},{"start_seconds":1,"end_seconds":2,"source_duration_seconds":1,"source_start_seconds":1,"source":source,"visual_scope":"blue frame second beat","model":"Gemini Omni Flash 1.1","provider_duration_seconds":1}]},"delivery":{"aspect_ratio":"16:9","resolution":"180p","fps":24},"tts":{"provider":"MMX","model":"speech","voice":"one-voice","single_take":True,"parameters":{},"output_path":"generated.wav"},"stems":{"video":{"path":"video.mp4","sha256":sha(self.d/"video.mp4")},"music":{"path":"music.wav","sha256":sha(self.d/"music.wav")},"voice":{"path":"voice.wav","sha256":sha(self.d/"voice.wav"),"line_timings":[{"text":"第一句","start_seconds":0.1,"end_seconds":0.8,"source_start_seconds":0,"source_end_seconds":0.5},{"text":"第二句","start_seconds":1.1,"end_seconds":1.8,"source_start_seconds":0.5,"source_end_seconds":1.0}]}}}
         self.mp=self.d/"manifest.json"; self.write()
     def tearDown(self): self.t.cleanup()
     def write(self): self.mp.write_text(json.dumps(self.manifest,ensure_ascii=False),encoding="utf-8")
@@ -28,6 +28,16 @@ class ProductionCliTest(unittest.TestCase):
         text=(out/"flow-derived-prompt.txt").read_text(encoding="utf-8")
         self.assertTrue(text.startswith("原始全文。对白不能删。")); self.assertIn("不要生成任何口头语言",text)
         req=json.loads((out/"flow-request-shot-01.json").read_text()); self.assertTrue(req["prompt"].startswith(text)); self.assertIn("全片时间 0.000s–1.000s",req["prompt"]); self.assertEqual(req["budget_group"]["ledger_id"],"fixture-flow-parent")
+        self.assertEqual(req["cost_policy"],{"max_credits":200,"confirm_above":200,"reject_when_unknown":True})
+        self.assertEqual(req["model_policy"],{"version":1,"required_family":"gemini_omni_flash_1_1","api_code":None,"allow_fallback":False,"execution_backend":"flow_ui","selection_source":"explicit"})
+    def test_derive_defaults_missing_model_to_omni(self):
+        for shot in self.manifest["timeline"]["shots"]: shot.pop("model")
+        self.write(); out=self.d/"derive-default-model"; self.call("derive","--manifest",self.mp,"--out-dir",out)
+        req=json.loads((out/"flow-request-shot-01.json").read_text())
+        self.assertEqual(req["model"],"Gemini Omni Flash 1.1")
+        self.assertEqual(req["model_policy"]["selection_source"],"default")
+        self.assertFalse(req["model_policy"]["allow_fallback"])
+        self.assertEqual(json.loads((out/"flow-ledger-plan.json").read_text())["cap_credits"],200)
     def test_tts_intent_is_idempotent_and_unknown_cannot_resubmit(self):
         state=self.d/"state"; self.call("tts-prepare","--manifest",self.mp,"--state-dir",state)
         intent=json.loads((state/"tts-intent.json").read_text()); intent["status"]="unknown"; (state/"tts-intent.json").write_text(json.dumps(intent))

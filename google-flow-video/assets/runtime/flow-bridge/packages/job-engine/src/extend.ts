@@ -16,7 +16,7 @@ export function assertExtendSource(storage:Storage, jobId:string, request:VideoG
   if(assets.length!==1||assets[0]?.providerAssetRef!==request.sourceAssetRef||assets[0]?.status!=="generated")throw new FlowBridgeError("RESULT_AMBIGUOUS","Extend source must be the parent's unique generated asset",{expected:request.sourceAssetRef,actual:assets.map(a=>a.providerAssetRef)});
   const parentRequest=JSON.parse(storage.getRequestJson(parent.id)) as VideoGenerationRequest;
   if(parentRequest.project.name!==request.project.name||parentRequest.model!==request.model)throw new FlowBridgeError("UNSUPPORTED_COMBINATION","Extend must retain the parent project and model",{parentProject:parentRequest.project.name,parentModel:parentRequest.model});
-  if(!parentRequest.budgetContext||parentRequest.budgetContext.ledgerId!==request.budgetContext.ledgerId)throw new FlowBridgeError("COST_LIMIT_EXCEEDED","Extend parent and child must share one 50-credit budget ledger");
+  if(!parentRequest.budgetContext||parentRequest.budgetContext.ledgerId!==request.budgetContext.ledgerId)throw new FlowBridgeError("COST_LIMIT_EXCEEDED","Continuation parent and child must share one immutable whole-run budget ledger");
   const parentStep=storage.getBudgetStep(parentRequest.budgetContext.ledgerId,parentRequest.budgetContext.stepKey);
   if(!parentStep)throw new FlowBridgeError("COST_LIMIT_EXCEEDED","Extend parent budget reservation is missing");
 }

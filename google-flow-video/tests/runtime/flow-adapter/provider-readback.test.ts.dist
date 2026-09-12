@@ -5,11 +5,12 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { FlowBridgeError, type VideoGenerationRequest } from "../../packages/contracts/src/index.js";
 import { FlowUiProvider, borrowExistingFlowTab, ownFlowPage } from "../../packages/flow-adapter/src/index.js";
+import { parseVisibleCredits } from "../../packages/flow-adapter/src/semantic-flow-page.js";
 
 let browser: Browser, context: BrowserContext, page: Page;
 const request = (overrides: Partial<VideoGenerationRequest> = {}): VideoGenerationRequest => ({
-  provider: "flow_ui", idempotencyKey: "fixture-key", project: { name: "fixture" }, mode: "text_to_video", prompt: "fixture prompt", promptMode: "verbatim", model: "omni-flash-1.1", aspectRatio: "16:9", durationSeconds: 4, resolution: "360p", outputs: 1,
-  costPolicy: { maxCredits: 50, confirmAbove: 50, rejectWhenUnknown: true }, authorizationContext: { source: "current_conversation", explicitlyRequestedGeneration: true }, ...overrides,
+  provider: "flow_ui", idempotencyKey: "fixture-key", project: { name: "fixture" }, mode: "text_to_video", prompt: "fixture prompt", promptMode: "verbatim", model: "Gemini Omni Flash 1.1", modelPolicy:{version:1,requiredFamily:"gemini_omni_flash_1_1",apiCode:null,allowFallback:false,executionBackend:"flow_ui",selectionSource:"default"}, aspectRatio: "16:9", durationSeconds: 4, resolution: "360p", outputs: 1,
+  costPolicy: { maxCredits: 200, confirmAbove: 200, rejectWhenUnknown: true }, authorizationContext: { source: "current_conversation", explicitlyRequestedGeneration: true }, ...overrides,
 });
 const contextFor = () => ({ jobId: "job_fixture", attemptId: "attempt_fixture", fencingToken: "fence_fixture", requestHash: "hash_fixture" });
 
@@ -18,8 +19,8 @@ beforeEach(async () => {
   const fixture = `<!doctype html><main>
     <button onclick="document.querySelector('#projectName').hidden=false; document.querySelector('#create').hidden=false">New project</button>
     <label>Project name<input id="projectName" aria-label="Project name" hidden></label><button id="create" hidden onclick="document.querySelector('h1').textContent=document.querySelector('#projectName').value; document.querySelector('#projectName').hidden=true; this.hidden=true">Create</button><h1>other project</h1>
-    <label>Generation type<select aria-label="Generation type"><option value="text_to_video">Text to video</option><option value="first_frame_to_video">First frame to video</option><option value="first_last_frames_to_video">First and last frames to video</option><option value="ingredients_to_video">Ingredients to video</option></select></label>
-    <label>Model<select aria-label="Model"><option value="omni-flash-1.1">omni-flash-1.1</option><option value="veo-3.1-fast">veo-3.1-fast</option></select></label>
+    <label>Generation type<select aria-label="Generation type"><option value="text_to_video">Text to video</option><option value="first_frame_to_video">First frame to video</option><option value="first_last_frames_to_video">First and last frames to video</option><option value="ingredients_to_video">Ingredients to video</option><option value="edit_video">Edit video</option></select></label>
+    <label>Model<select aria-label="Model"><option value="opaque-omni-option">Gemini Omni Flash 1.1</option><option value="veo-3.1-fast">Veo 3.1 Fast</option></select></label>
     <label>Orientation<select aria-label="Orientation"><option value="16:9">16:9</option><option value="9:16">9:16</option></select></label>
     <label>Duration<select aria-label="Duration"><option value="4">4</option><option value="8">8</option></select></label>
     <label>Resolution<select aria-label="Resolution"><option value="360p">360p</option><option value="720p">720p</option></select></label>
@@ -34,6 +35,7 @@ function ownedFixtureProvider(): FlowUiProvider { return new FlowUiProvider({ ac
 async function clicks(): Promise<number> { return page.evaluate(() => (window as unknown as { clicks?: number }).clicks ?? 0); }
 
 describe("Flow UI final readback fixture", () => {
+  it("never treats a per-output each price as the whole-job total",()=>expect(parseVisibleCredits("Price: 12 credits each")).toBeNull());
   it("reuses one borrowed user tab across success, failure, discard, submit, and reconcile without closing it", async () => {
     const p = provider();
     await p.readBalance();
@@ -57,7 +59,7 @@ describe("Flow UI final readback fixture", () => {
   it("returns an explicitly visible balance without treating it as a generation cost", async () => {
     const p = provider();
     await expect(p.readBalance()).resolves.toMatchObject({ balance: 800, source: "page_visible" });
-    await expect(p.readCapabilities()).resolves.toMatchObject({ source: "page_visible", observed: { model: "omni-flash-1.1", mode: "text_to_video", outputs: 1 } });
+    await expect(p.readCapabilities()).resolves.toMatchObject({ source: "page_visible", observed: { model: "opaque-omni-option", modelOption:{label:"Gemini Omni Flash 1.1",value:"opaque-omni-option"}, mode: "text_to_video", outputs: 1 } });
   });
   it("returns unknown capabilities when a required visible control is missing", async () => {
     await page.locator('select[aria-label="Generation type"]').evaluate(element => element.remove());
@@ -85,6 +87,15 @@ describe("Flow UI final readback fixture", () => {
     await page.selectOption('select[aria-label="Model"]', "veo-3.1-fast");
     await expect(p.submitPrepared(request(), prepared, contextFor())).rejects.toMatchObject({ code: "UNSUPPORTED_COMBINATION" } satisfies Partial<FlowBridgeError>);
     expect(await clicks()).toBe(0);
+  });
+  it("fails before intent when the exact Omni 1.1 option is absent or only an unversioned Omni label is visible",async()=>{
+    await page.locator('select[aria-label="Model"]').evaluate(element=>{element.innerHTML='<option value="omni">Omni Flash</option><option value="veo-3.1-fast">Veo 3.1 Fast</option>';});
+    await expect(provider().prepare(request())).rejects.toMatchObject({code:"UNSUPPORTED_COMBINATION"});
+    expect(await clicks()).toBe(0);
+  });
+  it("accepts an explicitly requested visible Veo option without falling back",async()=>{
+    const p=provider(),veo=request({model:"veo-3.1-fast",modelPolicy:{version:1,requiredFamily:"veo",apiCode:null,allowFallback:false,executionBackend:"flow_ui",selectionSource:"explicit"}});
+    const prepared=await p.prepare(veo);expect(prepared.snapshot.modelOption).toEqual({label:"Veo 3.1 Fast",value:"veo-3.1-fast"});await p.discardPrepared(prepared);expect(await clicks()).toBe(0);
   });
   it("rejects a manual mode change or an ambiguous project before Generate", async () => {
     const p = provider(), prepared = await p.prepare(request());
@@ -114,6 +125,7 @@ describe("Flow UI final readback fixture", () => {
     await expect(provider().prepare(request({ mode: "first_frame_to_video", inputs: { firstFrame: { path: input } } }))).rejects.toMatchObject({ code: "PROVIDER_UNAVAILABLE" } satisfies Partial<FlowBridgeError>);
     expect(await clicks()).toBe(0);
   });
+  it("keeps edit_video pre-intent when the current UI cannot prove the source-video slot upload",async()=>{const input=join(tmpdir(),`flowbridge-edit-${process.pid}.mp4`);await writeFile(input,"fixture");await expect(provider().prepare(request({mode:"edit_video",inputs:{sourceVideo:{path:input}}}))).rejects.toMatchObject({code:"PROVIDER_UNAVAILABLE"});expect(await clicks()).toBe(0);});
   it("reconciles only a unique completed card outside the persisted baseline", async () => {
     const project = "data:text/html," + encodeURIComponent('<main><article data-asset-id="old" data-asset-status="generated">old</article><article data-asset-id="new" data-asset-status="generated">new</article></main>');
     const result = await ownedFixtureProvider().reconcile(request(), { ...contextFor(), projectRef: project, intentRecordedAt: "2026-09-05T00:00:00Z", submissionEvidence: { beforeAssetRefs: ["old"] } });
@@ -123,4 +135,6 @@ describe("Flow UI final readback fixture", () => {
     const project = "data:text/html," + encodeURIComponent('<main><article data-asset-id="old" data-asset-status="generated">old</article></main>');
     await expect(ownedFixtureProvider().reconcile(request(), { ...contextFor(), projectRef: project, submissionEvidence: { beforeAssetRefs: ["old"] } })).rejects.toMatchObject({ code: "RESULT_AMBIGUOUS" } satisfies Partial<FlowBridgeError>);
   });
+  it("rejects a result card that visibly reports Veo for an Omni request",async()=>{const project="data:text/html,"+encodeURIComponent('<main><article data-asset-id="new" data-asset-status="generated" data-model-label="Veo 3.1 Fast" data-model-value="veo-3.1-fast">new</article></main>');await expect(ownedFixtureProvider().reconcile(request(),{...contextFor(),projectRef:project,submissionEvidence:{beforeAssetRefs:[]}})).rejects.toMatchObject({code:"RESULT_AMBIGUOUS"});});
+  it("keeps an unattributed result model unknown instead of copying the requested model",async()=>{const project="data:text/html,"+encodeURIComponent('<main><article data-asset-id="new" data-asset-status="generated">new</article></main>');const result=await ownedFixtureProvider().reconcile(request(),{...contextFor(),projectRef:project,submissionEvidence:{beforeAssetRefs:[]}});expect(result.assets[0].metadata).toMatchObject({providerModelReadback:{family:"unknown"},provenance:{modelActual:"unknown"}});});
 });

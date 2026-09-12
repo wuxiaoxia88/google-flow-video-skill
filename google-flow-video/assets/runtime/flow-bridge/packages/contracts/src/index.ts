@@ -1,4 +1,7 @@
-export const FLOW_CREDIT_HARD_CAP = 50 as const;
+export const FLOW_CREDIT_HARD_CAP = 200 as const;
+export const LEGACY_FLOW_CREDIT_HARD_CAP = 50 as const;
+import type { ModelPolicy,ProviderModelFamily } from "./model-policy.js";
+export { MODEL_POLICY_VERSION,DEFAULT_MODEL_POLICY,createModelPolicy,type ModelPolicy,type ProviderModelFamily } from "./model-policy.js";
 
 export type ProviderKind = "flow_ui" | "mock";
 export type GenerationMode =
@@ -6,7 +9,8 @@ export type GenerationMode =
   | "extend_video"
   | "first_frame_to_video"
   | "first_last_frames_to_video"
-  | "ingredients_to_video";
+  | "ingredients_to_video"
+  | "edit_video";
 
 export type JobState =
   | "CREATED" | "VALIDATING" | "AWAITING_CLARIFICATION" | "QUEUED"
@@ -37,13 +41,14 @@ export interface VideoGenerationRequest {
   prompt: string;
   promptMode: "verbatim" | "enhance";
   model: string;
+  modelPolicy?: ModelPolicy;
   aspectRatio: "16:9" | "9:16";
   durationSeconds: number;
   resolution: string;
   outputs: number;
-  inputs?: { firstFrame?: InputAsset; lastFrame?: InputAsset; ingredients?: InputAsset[] };
+  inputs?: { firstFrame?: InputAsset; lastFrame?: InputAsset; ingredients?: InputAsset[]; sourceVideo?: InputAsset };
   download?: { enabled: boolean; directory?: string; format?: "mp4" };
-  costPolicy: { maxCredits: 50; confirmAbove: 50; rejectWhenUnknown: true };
+  costPolicy: { maxCredits: number; confirmAbove: number; rejectWhenUnknown: true };
   authorizationContext: { source: "current_conversation"; explicitlyRequestedGeneration: boolean };
   budgetContext?: { ledgerId: string; stepKey: string };
   sourceParentJobId?: string;
@@ -55,6 +60,10 @@ export interface RuntimeSubmissionSnapshot {
   visibleAccountContext: string | null;
   projectRef: string;
   model: string;
+  modelOption?: { label: string; value: string } | null;
+  observedProviderFamily?: ProviderModelFamily;
+  capabilityCapture?: { hash: string; capturedAt: string; locale: string | null; source: "page_visible" | "executor_observation" } | null;
+  finalProviderModelReadback?: { family: ProviderModelFamily; label: string | null; value: string | null; source: "result_card" | "result_detail" | "unknown" };
   mode: GenerationMode;
   durationSeconds: number;
   aspectRatio: string;
@@ -93,7 +102,8 @@ export interface PreparedSubmission { snapshot: RuntimeSubmissionSnapshot; handl
 /** Sanitized observation supplied by the Codex CUA executor; never contains prompt, email, cookies, or tokens. */
 export interface ExistingBrowserObservation {
   browserId: string; tabId: string; url: string; observedAt: string;
-  configuration: { model: string; mode: GenerationMode; aspectRatio: string; durationSeconds: number; resolution: string; outputs: number } | null;
+  configuration: { model: string; modelOption?: { label: string; value: string } | null; mode: GenerationMode; aspectRatio: string; durationSeconds: number; resolution: string; outputs: number } | null;
+  capabilityCapture?: { hash: string; capturedAt: string; locale: string | null; modelOptions: Array<{ label: string; value: string }> } | null;
   availableCredits: number | null; totalCredits: number | null;
   visibleAccountContext: string | null; projectRef: string;
   visibleAssetRefs?: string[];
@@ -110,7 +120,7 @@ export interface ExistingBrowserCompletionEvidence {
   projectRef: string;
   completedAt: string;
   beforeAssetRefs: string[];
-  actual: { model: string; mode: GenerationMode; aspectRatio: string; durationSeconds: number; resolution: string; outputs: number; selectedSourceAssetRef?: string | null; outputKind?: "continuation" | "cumulative"; actualDurationSeconds?: number };
+  actual: { model: string; modelOption?: { label: string; value: string } | null; providerModelReadback?: { family: ProviderModelFamily; label: string | null; value: string | null; source: "result_card" | "result_detail" | "unknown" }; mode: GenerationMode; aspectRatio: string; durationSeconds: number; resolution: string; outputs: number; selectedSourceAssetRef?: string | null; outputKind?: "continuation" | "cumulative"; actualDurationSeconds?: number };
   assets: Array<{ providerAssetRef: string; status: "generated"; observedAt: string; downloadUrl?: string; outputKind?: "continuation" | "cumulative"; actualDurationSeconds?: number }>;
 }
 export interface ExistingBrowserDownloadEvidence { jobId:string; providerAssetRef:string; projectRef:string; downloadedAt:string; sourceSha256:string; }
@@ -143,7 +153,7 @@ export interface JobRecord {
 export type BudgetStepState = "RESERVED" | "CONSUMED" | "NOT_CHARGED";
 export interface BudgetLedger {
   parentId: string;
-  capCredits: 50;
+  capCredits: number;
   reservedCredits: number;
   consumedCredits: number;
   createdAt: string;

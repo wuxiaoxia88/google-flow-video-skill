@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { FlowBridgeError, type FlowProvider, type PreparedSubmission, type ProviderAsset, type ProviderContext, type VideoGenerationRequest } from "../../contracts/src/index.js";
 import { type BrowserPage } from "./browser-session.js";
 import { SemanticFlowPage } from "./semantic-flow-page.js";
+import { assertSnapshotMatches } from "../../policy-engine/src/index.js";
 
 const PAGE_LEASE = Symbol("flowbridge.page-lease");
 export interface FlowPageLease {
@@ -28,7 +29,7 @@ export interface FlowUiProviderOptions {
   downloadAsset?: (asset: ProviderAsset, directory: string) => Promise<ProviderAsset>;
 }
 export type ReadOnlyBalance = { balance: number | null; source: "page_visible" | "unknown"; capturedAt: string; reason?: string };
-export type ObservedCapabilities = { observed: { model: string; mode: string; aspectRatio: string; durationSeconds: number; resolution: string; outputs: number } | null; source: "page_visible" | "unknown"; capturedAt: string; reason?: string };
+export type ObservedCapabilities = Awaited<ReturnType<SemanticFlowPage["readObservedCombination"]>>;
 
 /** UI-only provider: no private endpoints, retries, or static-price authorization. */
 export class FlowUiProvider implements FlowProvider {
@@ -78,14 +79,15 @@ export class FlowUiProvider implements FlowProvider {
     try {
       const before = (await active.page.visibleAssets()).map(asset => asset.ref);
       const snapshot = await active.page.readSnapshot(request);
-      const configuredChanged = snapshot.model !== request.model || snapshot.mode !== request.mode || snapshot.aspectRatio !== request.aspectRatio || snapshot.durationSeconds !== request.durationSeconds || snapshot.resolution !== request.resolution || snapshot.outputs !== request.outputs;
-      const preparedChanged = snapshot.projectRef !== prepared.snapshot.projectRef || snapshot.model !== prepared.snapshot.model || snapshot.mode !== prepared.snapshot.mode || snapshot.aspectRatio !== prepared.snapshot.aspectRatio || snapshot.durationSeconds !== prepared.snapshot.durationSeconds || snapshot.resolution !== prepared.snapshot.resolution || snapshot.outputs !== prepared.snapshot.outputs || snapshot.visibleAccountContext !== prepared.snapshot.visibleAccountContext;
+      assertSnapshotMatches(request,snapshot);
+      const configuredChanged = snapshot.mode !== request.mode || snapshot.aspectRatio !== request.aspectRatio || snapshot.durationSeconds !== request.durationSeconds || snapshot.resolution !== request.resolution || snapshot.outputs !== request.outputs;
+      const preparedChanged = snapshot.projectRef !== prepared.snapshot.projectRef || snapshot.modelOption?.label !== prepared.snapshot.modelOption?.label || snapshot.modelOption?.value !== prepared.snapshot.modelOption?.value || snapshot.capabilityCapture?.hash!==prepared.snapshot.capabilityCapture?.hash || snapshot.mode !== prepared.snapshot.mode || snapshot.aspectRatio !== prepared.snapshot.aspectRatio || snapshot.durationSeconds !== prepared.snapshot.durationSeconds || snapshot.resolution !== prepared.snapshot.resolution || snapshot.outputs !== prepared.snapshot.outputs || snapshot.visibleAccountContext !== prepared.snapshot.visibleAccountContext;
       if (configuredChanged || preparedChanged) {
         throw new FlowBridgeError("UNSUPPORTED_COMBINATION", "Visible Flow settings changed after prepare; refusing the Generate click.", { requested: request, readback: snapshot });
       }
       if (snapshot.totalCredits === null) throw new FlowBridgeError("COST_UNKNOWN", "Visible Flow cost cannot be reliably read; refusing to submit.");
       if (snapshot.availableCredits !== null && snapshot.availableCredits < snapshot.totalCredits) throw new FlowBridgeError("INSUFFICIENT_CREDITS", "Visible account balance is below the whole-job cost; refusing to submit.", { availableCredits: snapshot.availableCredits, totalCredits: snapshot.totalCredits });
-      if (snapshot.totalCredits > request.costPolicy.maxCredits) throw new FlowBridgeError("COST_LIMIT_EXCEEDED", "Visible whole-job cost exceeds the 50-credit hard cap.", { totalCredits: snapshot.totalCredits });
+      if (snapshot.totalCredits > request.costPolicy.maxCredits) throw new FlowBridgeError("COST_LIMIT_EXCEEDED", `Visible whole-job cost exceeds the authorized ${request.costPolicy.maxCredits}-Credit ceiling.`, { totalCredits: snapshot.totalCredits });
       // Exactly one button click; the job engine records the intent before this method is reached.
       await active.page.clickGenerateOnce();
       return { evidence: { attemptId: context.attemptId, requestHash: context.requestHash, beforeAssetRefs: before, projectRef: snapshot.projectRef, submittedAt: new Date().toISOString(), snapshot } };
@@ -110,11 +112,14 @@ export class FlowUiProvider implements FlowProvider {
       const candidates = (await new SemanticFlowPage(lease.page).visibleAssets()).filter(asset => !before.includes(asset.ref));
       const providerAssets: ProviderAsset[] = candidates.map(asset => ({
         providerAssetRef: asset.ref, status: asset.status,
-        metadata: { projectRef, cardRef: asset.ref, provenance: { jobId: context.jobId, projectName: request.project.name, projectUrl: projectRef, modelRequested: request.model, modelActual: request.model, aspectRatio: request.aspectRatio, durationSeconds: request.durationSeconds, resolution: request.resolution, promptSha256: context.requestHash, targetMatchEvidence: { provider_card_ref: asset.ref, before_asset_refs: before, intent_recorded_at: context.intentRecordedAt ?? null }, inputAssets: inputHashes(request) } },
+        metadata: { projectRef, cardRef: asset.ref, providerModelReadback:asset.modelReadback, provenance: { jobId: context.jobId, projectName: request.project.name, projectUrl: projectRef, modelRequested: request.model, modelActual: asset.modelReadback.family==="unknown"?"unknown":asset.modelReadback.label??asset.modelReadback.value??"unknown", aspectRatio: request.aspectRatio, durationSeconds: request.durationSeconds, resolution: request.resolution, promptSha256: context.requestHash, targetMatchEvidence: { provider_card_ref: asset.ref, before_asset_refs: before, intent_recorded_at: context.intentRecordedAt ?? null }, inputAssets: inputHashes(request) } },
       }));
       if (candidates.some(asset => asset.status === "generating")) return { assets: providerAssets, complete: false };
       const done = candidates.filter(asset => asset.status === "generated");
       if (done.length !== request.outputs || candidates.length !== request.outputs) throw new FlowBridgeError("RESULT_AMBIGUOUS", "Completed Flow cards cannot be uniquely attributed to this submission.", { candidateCount: candidates.length, completedCount: done.length, expectedOutputs: request.outputs });
+      const required=request.modelPolicy?.requiredFamily;
+      const mismatched=done.filter(asset=>asset.modelReadback.family!=="unknown"&&required&&asset.modelReadback.family!==required);
+      if(mismatched.length)throw new FlowBridgeError("RESULT_AMBIGUOUS","Result card model readback conflicts with the immutable requested model policy",{requiredFamily:required,readbacks:mismatched.map(x=>x.modelReadback)});
       return { assets: providerAssets, complete: true };
     } finally { await lease.release(); }
   }

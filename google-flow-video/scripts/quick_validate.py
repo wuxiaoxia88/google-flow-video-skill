@@ -14,10 +14,11 @@ REQUIRED = [
     "references/runtime-operations.md", "references/executor-session-lifecycle.md", "templates/request.background_music_only.json",
     "templates/fixture.request.json", "templates/delivery.manifest.template.json",
     "scripts/execute_fixture.sh", "scripts/bootstrap_runtime.sh", "scripts/package_skill.sh", "scripts/install_skill.sh",
-    "assets/runtime/flow-bridge/package.json", "assets/runtime/flow-bridge/pnpm-lock.yaml",
-    "assets/runtime/flow-bridge/apps/flowctl/src/index.ts",
+    "assets/runtime/flow-bridge/package.json", "assets/runtime/flow-bridge/pnpm-lock.yaml", "assets/runtime/flow-bridge/vitest.config.ts",
+    "assets/runtime/flow-bridge/apps/flowctl/src/index.ts", "assets/runtime/flow-bridge/apps/flowd/dashboard/index.html",
+    "assets/runtime/flow-bridge/packages/contracts/src/model-policy.ts", "assets/runtime/flow-bridge/packages/production-workspace/src/index.ts",
     "assets/runtime/flow-bridge/scripts/production.py", "assets/runtime/flow-bridge/docs/PRODUCTION_CLI.md",
-    "tests/runtime/acceptance/cli-blackbox.test.ts.dist",
+    "tests/runtime/acceptance/cli-blackbox.test.ts.dist", "tests/runtime/acceptance/production-apps.test.ts.dist", "tests/runtime/production-workspace/production-workspace.test.ts.dist",
     "tests/runtime/production/test_production_cli.py",
 ]
 FORBIDDEN_PARTS = {"node_modules", ".git", ".pnpm", "venv", "__pycache__", "data", "out", "qc", "test-reports"}

@@ -17,7 +17,8 @@ export async function freezeRequest(request: VideoGenerationRequest): Promise<{r
   const inputs = request.inputs ? {
     firstFrame: request.inputs.firstFrame ? await freezeAsset(request.inputs.firstFrame) : undefined,
     lastFrame: request.inputs.lastFrame ? await freezeAsset(request.inputs.lastFrame) : undefined,
-    ingredients: request.inputs.ingredients ? await Promise.all(request.inputs.ingredients.map(freezeAsset)) : undefined
+    ingredients: request.inputs.ingredients ? await Promise.all(request.inputs.ingredients.map(freezeAsset)) : undefined,
+    sourceVideo: request.inputs.sourceVideo ? await freezeAsset(request.inputs.sourceVideo) : undefined
   } : undefined;
   const frozen = {...request, inputs};
   return {request:frozen, requestHash:sha256(stableStringify(frozen)), finalPromptSha256:sha256(request.prompt)};

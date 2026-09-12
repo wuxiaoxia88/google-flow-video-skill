@@ -7,7 +7,8 @@ const fixtureTab = "tab-fixture-current";
 const valid = () => ({
   browserId: "browser-fixture", tabId: fixtureTab, url: fixtureProject,
   observedAt: new Date().toISOString(),
-  configuration: { model: "omni-flash-1.1", mode: "text_to_video", aspectRatio: "16:9", durationSeconds: 4, resolution: "360p", outputs: 1 },
+  configuration: { model: "opaque-omni-option",modelOption:{label:"Gemini Omni Flash 1.1",value:"opaque-omni-option"}, mode: "text_to_video", aspectRatio: "16:9", durationSeconds: 4, resolution: "360p", outputs: 1 },
+  capabilityCapture:{hash:`sha256:${"a".repeat(64)}`,capturedAt:new Date().toISOString(),locale:"en-US",modelOptions:[{label:"Gemini Omni Flash 1.1",value:"opaque-omni-option"}]},
   availableCredits: 800, totalCredits: 8, visibleAccountContext: "Google AI Pro",
   projectRef: fixtureProject,
   visibleAssetRefs: undefined, selectedSourceAssetRef: null,

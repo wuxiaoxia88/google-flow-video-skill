@@ -13,7 +13,8 @@ const request = (key: string): VideoGenerationRequest => ({
   mode: "text_to_video",
   prompt: "fixture prompt",
   promptMode: "verbatim",
-  model: "fixture-model",
+  model: "Gemini Omni Flash 1.1",
+  modelPolicy:{version:1,requiredFamily:"gemini_omni_flash_1_1",apiCode:null,allowFallback:false,executionBackend:"flow_ui",selectionSource:"default"},
   aspectRatio: "16:9",
   durationSeconds: 4,
   resolution: "360p",
@@ -29,7 +30,8 @@ const observation = (overrides: Partial<ExistingBrowserObservation> = {}): Exist
   url: "https://flow.google.com/project/fixture-project",
   projectRef: "https://flow.google.com/project/fixture-project",
   observedAt: new Date().toISOString(),
-  configuration: { model: "fixture-model", mode: "text_to_video", aspectRatio: "16:9", durationSeconds: 4, resolution: "360p", outputs: 1 },
+  configuration: { model: "opaque-omni",modelOption:{label:"Gemini Omni Flash 1.1",value:"opaque-omni"}, mode: "text_to_video", aspectRatio: "16:9", durationSeconds: 4, resolution: "360p", outputs: 1 },
+  capabilityCapture:{hash:`sha256:${"d".repeat(64)}`,capturedAt:new Date().toISOString(),locale:"en-US",modelOptions:[{label:"Gemini Omni Flash 1.1",value:"opaque-omni"}]},
   totalCredits: 50,
   availableCredits: 1035,
   visibleAccountContext: `account-sha256:${"a".repeat(64)}`,
@@ -137,7 +139,7 @@ describe("existing-browser session safety acceptance", () => {
 
   it("reserves a budgeted browser step against its shared parent ledger", async () => {
     const x = await setup("budgeted-setup");
-    x.storage.createBudgetLedger("run-budget");
+    x.storage.createBudgetLedger("run-budget",50);
     const budgeted = { ...request("budgeted-step-a"), budgetContext: { ledgerId: "run-budget", stepKey: "step-a" } };
     const budgetJob = await x.engine.create(budgeted);
     x.engine.prepareExistingBrowser(budgetJob.id, observation({ tabId: "tab-budget-a", totalCredits: 30 }));

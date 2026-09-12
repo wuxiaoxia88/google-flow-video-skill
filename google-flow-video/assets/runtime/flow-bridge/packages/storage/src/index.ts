@@ -1,6 +1,6 @@
 import Database from "better-sqlite3";
 import { randomUUID } from "node:crypto";
-import { FlowBridgeError, type BrowserExecutionTicket, type BudgetLedger, type BudgetStep, type ExistingBrowserObservation, type JobRecord, type JobState, type LegacyBaselineAttestationEvidence, type ProviderAsset, type ProviderKind, type RuntimeSubmissionSnapshot } from "../../contracts/src/index.js";
+import { FLOW_CREDIT_HARD_CAP, LEGACY_FLOW_CREDIT_HARD_CAP, FlowBridgeError, type BrowserExecutionTicket, type BudgetLedger, type BudgetStep, type ExistingBrowserObservation, type JobRecord, type JobState, type LegacyBaselineAttestationEvidence, type ProviderAsset, type ProviderKind, type RuntimeSubmissionSnapshot } from "../../contracts/src/index.js";
 
 export class Storage {
   readonly db: Database.Database;
@@ -57,7 +57,7 @@ export class Storage {
         PRIMARY KEY(browser_id,tab_id,project_ref), FOREIGN KEY(job_id) REFERENCES jobs(id)
       );
       CREATE TABLE IF NOT EXISTS budget_ledgers (
-        parent_id TEXT PRIMARY KEY, cap_credits INTEGER NOT NULL CHECK(cap_credits=50),
+        parent_id TEXT PRIMARY KEY, cap_credits INTEGER NOT NULL CHECK(cap_credits IN (50,200)),
         reserved_credits INTEGER NOT NULL DEFAULT 0, consumed_credits INTEGER NOT NULL DEFAULT 0,
         created_at TEXT NOT NULL
       );
@@ -88,6 +88,17 @@ export class Storage {
     if(!attemptColumns.includes("attempt_status")) this.db.exec("ALTER TABLE submission_attempts ADD COLUMN attempt_status TEXT NOT NULL DEFAULT 'ACTIVE'");
     const budgetSql=String((this.db.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='budget_steps'").get() as {sql:string}).sql);
     if(!budgetSql.includes("NOT_CHARGED")){this.db.pragma("foreign_keys = OFF");this.db.pragma("legacy_alter_table = ON");this.db.exec(`ALTER TABLE budget_steps RENAME TO budget_steps_v1;CREATE TABLE budget_steps(parent_id TEXT NOT NULL,step_key TEXT NOT NULL,quoted_credits INTEGER NOT NULL CHECK(quoted_credits>=0),state TEXT NOT NULL CHECK(state IN ('RESERVED','CONSUMED','NOT_CHARGED')),created_at TEXT NOT NULL,job_id TEXT,request_hash TEXT,PRIMARY KEY(parent_id,step_key),FOREIGN KEY(parent_id) REFERENCES budget_ledgers(parent_id));INSERT INTO budget_steps SELECT * FROM budget_steps_v1;DROP TABLE budget_steps_v1;`);this.db.pragma("legacy_alter_table = OFF");this.db.pragma("foreign_keys = ON");const fk=this.db.prepare("PRAGMA foreign_key_check").all();if(fk.length)throw new Error(`budget migration broke foreign keys: ${JSON.stringify(fk)}`);}
+    const ledgerSql=String((this.db.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='budget_ledgers'").get() as {sql:string}).sql);
+    if(!ledgerSql.includes("200")){
+      this.db.pragma("foreign_keys = OFF");this.db.pragma("legacy_alter_table = ON");
+      try{
+        this.db.exec("BEGIN IMMEDIATE");
+        this.db.exec(`ALTER TABLE budget_ledgers RENAME TO budget_ledgers_v1;CREATE TABLE budget_ledgers(parent_id TEXT PRIMARY KEY,cap_credits INTEGER NOT NULL CHECK(cap_credits IN (50,200)),reserved_credits INTEGER NOT NULL DEFAULT 0,consumed_credits INTEGER NOT NULL DEFAULT 0,created_at TEXT NOT NULL);INSERT INTO budget_ledgers SELECT * FROM budget_ledgers_v1;DROP TABLE budget_ledgers_v1;`);
+        const fk=this.db.prepare("PRAGMA foreign_key_check").all();if(fk.length)throw new Error(`ledger cap migration broke foreign keys: ${JSON.stringify(fk)}`);
+        this.db.exec("COMMIT");
+      }catch(error){if(this.db.inTransaction)this.db.exec("ROLLBACK");throw error;}
+      finally{this.db.pragma("legacy_alter_table = OFF");this.db.pragma("foreign_keys = ON");}
+    }
     for(const sql of ["ALTER TABLE browser_baseline_attestations ADD COLUMN record_type TEXT NOT NULL DEFAULT 'pre_submit_observation'","ALTER TABLE browser_baseline_attestations ADD COLUMN evidence_json TEXT"])try{this.db.exec(sql);}catch(error){if(!String(error).includes("duplicate column name"))throw error;}
   }
   createOrGet(input: { provider: ProviderKind; idempotencyKey: string; requestHash: string; requestJson: string; finalPromptSha256: string }): { job: JobRecord; created: boolean } {
@@ -114,7 +125,7 @@ export class Storage {
     return this.db.transaction(() => this.recordIntentUnsafe(jobId, requestHash, snapshot))();
   }
   /** Atomically reserves one current-browser binding and persists its intent. */
-  reserveExistingBrowserIntent(input: { jobId: string; requestHash: string; snapshot: RuntimeSubmissionSnapshot; browserId: string; tabId: string; projectRef: string; budget?: { ledgerId: string; stepKey: string; quotedCredits: number } }): { attemptId: string; fencingToken: string; existed: boolean } {
+  reserveExistingBrowserIntent(input: { jobId: string; requestHash: string; snapshot: RuntimeSubmissionSnapshot; browserId: string; tabId: string; projectRef: string; budget?: { ledgerId: string; stepKey: string; quotedCredits: number; capCredits?:number } }): { attemptId: string; fencingToken: string; existed: boolean } {
     return this.db.transaction(() => {
       const lease = this.db.prepare("SELECT job_id FROM browser_execution_leases WHERE browser_id=? AND tab_id=? AND project_ref=?").get(input.browserId,input.tabId,input.projectRef) as {job_id:string}|undefined;
       if (lease && lease.job_id !== input.jobId) {
@@ -122,7 +133,7 @@ export class Storage {
         if (holder && !["COMPLETED","PARTIALLY_COMPLETED","FAILED","CANCELLED_PRE_SUBMIT","GENERATED"].includes(holder.state)) throw new FlowBridgeError("PROVIDER_UNAVAILABLE", "Existing Flow browser tab/project is leased by another unfinished job.", { reason: "BROWSER_SESSION_BUSY", holderJobId: lease.job_id });
         this.db.prepare("DELETE FROM browser_execution_leases WHERE browser_id=? AND tab_id=? AND project_ref=?").run(input.browserId,input.tabId,input.projectRef);
       }
-      if (input.budget) this.reserveBudgetStepUnsafe(input.budget.ledgerId,input.budget.stepKey,input.budget.quotedCredits,{jobId:input.jobId,requestHash:input.requestHash});
+      if (input.budget){this.createBudgetLedger(input.budget.ledgerId,input.budget.capCredits);this.reserveBudgetStepUnsafe(input.budget.ledgerId,input.budget.stepKey,input.budget.quotedCredits,{jobId:input.jobId,requestHash:input.requestHash});}
       this.db.prepare("INSERT OR IGNORE INTO browser_execution_leases(browser_id,tab_id,project_ref,job_id,acquired_at) VALUES(?,?,?,?,?)").run(input.browserId,input.tabId,input.projectRef,input.jobId,new Date().toISOString());
       return this.recordIntentUnsafe(input.jobId,input.requestHash,input.snapshot);
     })();
@@ -167,7 +178,7 @@ export class Storage {
   }
   saveAssets(jobId:string,assets:ProviderAsset[]){const now=new Date().toISOString();const stmt=this.db.prepare("INSERT INTO assets(provider_asset_ref,job_id,payload_json,local_path,sha256,created_at) VALUES(?,?,?,?,?,?) ON CONFLICT(job_id,provider_asset_ref) DO UPDATE SET payload_json=excluded.payload_json,local_path=excluded.local_path,sha256=excluded.sha256");this.db.transaction(()=>{for(const asset of assets)stmt.run(asset.providerAssetRef,jobId,JSON.stringify(asset),asset.localPath??null,asset.sha256??null,now);})();}
   getAssets(jobId:string):any[]{return (this.db.prepare("SELECT payload_json FROM assets WHERE job_id=? ORDER BY provider_asset_ref").all(jobId) as Array<{payload_json:string}>).map(x=>JSON.parse(x.payload_json));}
-  createBudgetLedger(parentId:string):BudgetLedger { const now=new Date().toISOString(); this.db.prepare("INSERT OR IGNORE INTO budget_ledgers(parent_id,cap_credits,created_at) VALUES(?,50,?)").run(parentId,now); return this.getBudgetLedger(parentId)!; }
+  createBudgetLedger(parentId:string,capCredits:number=FLOW_CREDIT_HARD_CAP):BudgetLedger { if(capCredits!==FLOW_CREDIT_HARD_CAP&&capCredits!==LEGACY_FLOW_CREDIT_HARD_CAP)throw new Error("INVALID_BUDGET_CAP");const now=new Date().toISOString(); this.db.prepare("INSERT OR IGNORE INTO budget_ledgers(parent_id,cap_credits,created_at) VALUES(?,?,?)").run(parentId,capCredits,now); return this.getBudgetLedger(parentId)!; }
   getBudgetLedger(parentId:string):BudgetLedger|null { const r=this.db.prepare("SELECT * FROM budget_ledgers WHERE parent_id=?").get(parentId) as BudgetLedgerRow|undefined; return r?{parentId:r.parent_id,capCredits:r.cap_credits,reservedCredits:r.reserved_credits,consumedCredits:r.consumed_credits,createdAt:r.created_at}:null; }
   reserveBudgetStep(parentId:string,stepKey:string,quotedCredits:number,binding:{jobId?:string;requestHash?:string}={}):BudgetStep { return this.db.transaction(()=>this.reserveBudgetStepUnsafe(parentId,stepKey,quotedCredits,binding))(); }
   private reserveBudgetStepUnsafe(parentId:string,stepKey:string,quotedCredits:number,binding:{jobId?:string;requestHash?:string}={}):BudgetStep { if(!Number.isInteger(quotedCredits)||quotedCredits<0)throw new Error("INVALID_BUDGET_QUOTE"); this.createBudgetLedger(parentId); const old=this.db.prepare("SELECT * FROM budget_steps WHERE parent_id=? AND step_key=?").get(parentId,stepKey) as BudgetStepRow|undefined; if(old){if((binding.jobId&&old.job_id!==binding.jobId)||(binding.requestHash&&old.request_hash!==binding.requestHash))throw new Error("BUDGET_STEP_CONFLICT");return rowToBudgetStep(old);} const ledger=this.getBudgetLedger(parentId)!; if(ledger.reservedCredits+quotedCredits>ledger.capCredits)throw new Error("BUDGET_EXCEEDED"); const now=new Date().toISOString(); this.db.prepare("INSERT INTO budget_steps(parent_id,step_key,quoted_credits,state,created_at,job_id,request_hash) VALUES(?,?,?,?,?,?,?)").run(parentId,stepKey,quotedCredits,"RESERVED",now,binding.jobId??null,binding.requestHash??null); this.db.prepare("UPDATE budget_ledgers SET reserved_credits=reserved_credits+? WHERE parent_id=?").run(quotedCredits,parentId); return {parentId,stepKey,quotedCredits,state:"RESERVED" as const,createdAt:now}; }
@@ -179,7 +190,7 @@ export class Storage {
 
 type Row = {id:string;provider:ProviderKind;idempotency_key:string;request_hash:string;final_prompt_sha256:string;state:JobState;runtime_snapshot_json:string|null;error_code:any;created_at:string;updated_at:string};
 export type AttemptRow = {id:string;job_id:string;ordinal:number;attempt_status:"ACTIVE"|"FAILED"|"SUCCEEDED"|"UNRESOLVED";fencing_token:string;request_hash:string;snapshot_json:string;intent_recorded_at:string;evidence_json:string|null};
-type BudgetLedgerRow={parent_id:string;cap_credits:50;reserved_credits:number;consumed_credits:number;created_at:string};
+type BudgetLedgerRow={parent_id:string;cap_credits:number;reserved_credits:number;consumed_credits:number;created_at:string};
 type BudgetStepRow={parent_id:string;step_key:string;quoted_credits:number;state:"RESERVED"|"CONSUMED"|"NOT_CHARGED";created_at:string;job_id:string|null;request_hash:string|null};
 function rowToBudgetStep(r:BudgetStepRow):BudgetStep{return {parentId:r.parent_id,stepKey:r.step_key,quotedCredits:r.quoted_credits,state:r.state,createdAt:r.created_at};}
 function rowToJob(r: Row): JobRecord { return {id:r.id,provider:r.provider,idempotencyKey:r.idempotency_key,requestHash:r.request_hash,finalPromptSha256:r.final_prompt_sha256,state:r.state,runtimeSnapshot:r.runtime_snapshot_json?JSON.parse(r.runtime_snapshot_json):null,errorCode:r.error_code,createdAt:r.created_at,updatedAt:r.updated_at}; }
